@@ -1,0 +1,87 @@
+name: Auracaster macOS app
+
+# Builds the SwiftUI app under macos/ (XcodeGen, Swift 6, macOS 26 SDK) and uploads an
+# ad-hoc signed Auracaster.app as ZIP artifact. Only runs when the app or this workflow
+# changes, or when started by hand - macOS minutes count 10x on private repositories.
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'macos/**'
+      - 'engine/**'
+      - '.github/workflows/auracaster-macos.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auracaster-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Auracaster.app (Xcode 26+)
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Select newest Xcode
+        shell: bash
+        run: |
+          ls -d /Applications/Xcode*.app || true
+          XC=$(ls -d /Applications/Xcode_*.app 2>/dev/null | grep -v -i beta | sort -V | tail -n 1)
+          [ -z "$XC" ] && XC=$(ls -d /Applications/Xcode_*.app | sort -V | tail -n 1)
+          echo "Using $XC"
+          sudo xcode-select -s "$XC/Contents/Developer"
+          xcodebuild -version
+          echo "::notice title=Xcode::$(xcodebuild -version | tr '\n' ' ') / $(xcrun --show-sdk-version --sdk macosx 2>/dev/null)"
+          sw_vers
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: cd macos && xcodegen generate
+
+      - name: Build (Release, unsigned)
+        shell: bash
+        run: |
+          set -o pipefail
+          cd macos
+          xcodebuild -project Auracaster.xcodeproj -scheme Auracaster -configuration Release \
+            -destination 'platform=macOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO build 2>&1 | tee build.log || {
+            # surface compiler errors as annotations so they can be read through the API
+            grep -E 'error:' build.log | sort -u | head -n 50 | while IFS= read -r line; do
+              echo "::error title=xcodebuild::${line#$GITHUB_WORKSPACE/}"
+            done
+            exit 1
+          }
+          grep -E 'warning:' build.log | sort -u | head -n 10 | while IFS= read -r line; do
+            echo "::warning title=xcodebuild::${line#$GITHUB_WORKSPACE/}"
+          done
+
+      - name: Sign ad-hoc and package
+        shell: bash
+        run: |
+          APP=macos/build/Build/Products/Release/Auracaster.app
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" Auracaster-macOS.zip
+          ls -l Auracaster-macOS.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Auracaster-macOS
+          path: Auracaster-macOS.zip
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-log
+          path: macos/build.log
+          retention-days: 7
