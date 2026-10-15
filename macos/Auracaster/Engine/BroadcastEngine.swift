@@ -1,0 +1,124 @@
+import Foundation
+
+// MARK: - Engine abstraction
+//
+// The SwiftUI layer only talks to `BroadcastEngine`. Two implementations:
+//   • `BumbleEngineClient` – launches engine/auracaster_helper.py (Bumble) as a
+//     subprocess and speaks JSON Lines over stdin/stdout.
+//   • `MockEngine` – in-process simulation for SwiftUI previews and UI work
+//     without a USB dongle.
+
+/// Everything the engine needs to start one broadcast (one BIG).
+struct BroadcastRequest: Sendable, Equatable {
+    var name: String
+    /// 24-bit Broadcast_ID, 0 = let the helper pick a random one.
+    var broadcastID: Int = 0
+    /// Broadcast Code (≤ 16 bytes). `nil` = unencrypted.
+    var broadcastCode: String?
+    var language: String? = "deu"  // ISO 639-3
+    var programInfo: String?
+    var isPublic: Bool = true
+    /// Helper audio input spec: "fifo:/path", "file:/x.wav", "silence".
+    var audioInput: String = "silence"
+    /// Raw PCM format: "float32le,48000,2" or "int16le,48000,2".
+    var audioFormat: String = "float32le,48000,2"
+    var preset: BroadcastPreset = .ultraLow
+}
+
+enum EngineState: String, Sendable, Codable {
+    case notLaunched
+    case idle
+    case starting
+    case live
+    case stopping
+    case error
+}
+
+struct EngineStatus: Sendable, Equatable {
+    var state: EngineState
+    var transport: String?
+    var controllerConnected: Bool
+    var controllerAddress: String?
+    var supportsIsoBroadcaster: Bool?
+    var estimatedLatencyMilliseconds: Int?
+    var framesSent: Int
+    var uptimeSeconds: Double
+    var broadcastID: Int?
+    var errorMessage: String?
+
+    static let notLaunched = EngineStatus(
+        state: .notLaunched, transport: nil, controllerConnected: false,
+        controllerAddress: nil, supportsIsoBroadcaster: nil,
+        estimatedLatencyMilliseconds: nil, framesSent: 0, uptimeSeconds: 0,
+        broadcastID: nil, errorMessage: nil
+    )
+}
+
+/// An Auracast broadcast seen while scanning (other transmitters nearby).
+struct DiscoveredBroadcast: Sendable, Identifiable, Hashable {
+    var address: String
+    var broadcastID: Int
+    var name: String?
+    var rssi: Int?
+    var id: String { "\(address)#\(broadcastID)" }
+}
+
+/// Peak/RMS in dBFS per channel (index 0 = L, 1 = R).
+struct StereoLevels: Sendable, Equatable {
+    var peak: [Double] = [-120, -120]
+    var rms: [Double] = [-120, -120]
+
+    static let silent = StereoLevels()
+
+    /// 0…1 for meter drawing (-60 dBFS … 0 dBFS).
+    func normalizedPeak(_ channel: Int) -> Double {
+        guard peak.indices.contains(channel) else { return 0 }
+        return min(1, max(0, (peak[channel] + 60) / 60))
+    }
+
+    func normalizedRMS(_ channel: Int) -> Double {
+        guard rms.indices.contains(channel) else { return 0 }
+        return min(1, max(0, (rms[channel] + 60) / 60))
+    }
+}
+
+enum EngineEvent: Sendable {
+    case ready(version: String, lc3Available: Bool)
+    case status(EngineStatus)
+    case levels(StereoLevels)
+    case broadcastFound(DiscoveredBroadcast)
+    case scanComplete(count: Int)
+    case acknowledged(id: Int)
+    case failure(id: Int?, message: String)
+    case log(String)
+    case terminated(exitCode: Int32)
+}
+
+enum EngineError: LocalizedError {
+    case helperNotFound
+    case pythonNotFound(String)
+    case notLaunched
+    case writeFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .helperNotFound: "auracaster_helper.py wurde im App-Bundle nicht gefunden."
+        case .pythonNotFound(let path): "Python-Interpreter nicht gefunden: \(path)"
+        case .notLaunched: "Die Engine läuft nicht."
+        case .writeFailed(let reason): "Senden an die Engine fehlgeschlagen: \(reason)"
+        }
+    }
+}
+
+/// Control interface of the broadcast engine.
+protocol BroadcastEngine: Sendable {
+    /// Single consumer stream of engine events.
+    var events: AsyncStream<EngineEvent> { get }
+
+    func launch() async throws
+    func start(_ request: BroadcastRequest) async throws
+    func stop() async throws
+    func requestStatus() async throws
+    func scan(duration: Double) async throws
+    func shutdown() async
+}
