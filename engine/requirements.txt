@@ -1,0 +1,5 @@
+# Python environment for the Auracaster engine helper (this Bumble fork + LC3).
+# Run from the repository root:
+#   python3 -m venv .venv
+#   .venv/bin/pip install -r engine/requirements.txt
+-e .[auracast]
