@@ -1,16 +1,8 @@
 name: Gradle Android Build & test
 
+# Auracaster fork: inherited Bumble workflow, manual start only (private repo pays Actions minutes)
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-    paths:
-      - 'extras/android/BtBench/**'
   workflow_dispatch:
-    branches: [main]
-    paths:
-      - 'extras/android/BtBench/**'
 
 permissions:
   contents: read

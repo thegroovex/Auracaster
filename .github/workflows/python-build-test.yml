@@ -1,13 +1,9 @@
 # Build and test the python package
 name: Python build and test
 
+# Auracaster fork: inherited Bumble workflow, manual start only (private repo pays Actions minutes)
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
   workflow_dispatch:
-    branches: [main]
 
 permissions:
   contents: read

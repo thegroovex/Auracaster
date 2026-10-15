@@ -11,16 +11,9 @@
 #
 name: "CodeQL"
 
+# Auracaster fork: inherited Bumble workflow, manual start only (private repo pays Actions minutes)
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    # The branches below must be a subset of the branches above
-    branches: [ main ]
   workflow_dispatch:
-    branches: [main]
-  schedule:
-    - cron: '39 21 * * 4'
 
 jobs:
   analyze:

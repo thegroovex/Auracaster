@@ -1,13 +1,9 @@
 # Check the code against the formatter and linter
 name: Code format and lint check
 
+# Auracaster fork: inherited Bumble workflow, manual start only (private repo pays Actions minutes)
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
   workflow_dispatch:
-    branches: [main]
 
 permissions:
   contents: read
