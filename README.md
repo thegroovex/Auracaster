@@ -1,3 +1,13 @@
+> ## Auracaster fork
+>
+> Dieses Repository ist **Auracaster**, ein Fork von [google/bumble](https://github.com/google/bumble).
+> Er ergänzt eine native macOS-App, die Mac-Audio als **Auracast™-Broadcast (LE Audio, BIS)** über
+> einen USB-HCI-Dongle sendet (nRF52840 mit Zephyr `hci_usb`, ISO/BIS aktiviert).
+>
+> - [`macos/`](macos/README.md) – SwiftUI-App (macOS 26+, gestaltet für macOS 27 „Golden Gate“), XcodeGen-Projekt, App-Icon, Design-Mockups
+> - [`engine/auracaster_helper.py`](engine/auracaster_helper.py) – Bumble/LC3-Broadcast-Engine ohne UI, gesteuert per JSON Lines
+>
+> Alles unterhalb dieses Kastens ist das unveränderte Bumble-README. Upstream-Änderungen kommen über den Remote `upstream`.
 
      _                 _     _
     | |               | |   | |
