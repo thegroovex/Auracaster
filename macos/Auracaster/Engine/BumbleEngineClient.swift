@@ -15,8 +15,8 @@ actor BumbleEngineClient: BroadcastEngine {
         var pythonExecutable: URL
         /// Overrides the helper inside the app bundle (useful during development).
         var helperScript: URL?
-        /// Bumble transport spec, e.g. "usb:0" or "usb:2fe3:000b".
-        var transport: String = "usb:0"
+        /// Bumble transport spec, e.g. "auto" (Auracaster Dongle via serial H4), "serial:/dev/cu.usbmodem1101,resync" or "usb:0".
+        var transport: String = "auto"
         /// Extra environment, e.g. PYTHONPATH pointing at the repo checkout.
         var environment: [String: String] = [:]
         var logLevel: String = "INFO"
@@ -34,7 +34,7 @@ actor BumbleEngineClient: BroadcastEngine {
             return Configuration(
                 pythonExecutable: URL(fileURLWithPath: python),
                 helperScript: helper,
-                transport: defaults.string(forKey: SettingsKeys.transport) ?? "usb:0",
+                transport: defaults.string(forKey: SettingsKeys.transport) ?? "auto",
                 environment: environment
             )
         }
