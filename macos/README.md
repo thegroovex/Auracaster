@@ -86,6 +86,22 @@ python3 Branding/make_icon.py   # schreibt AppIcon.svg + alle PNGs (16–1024 px
 
 Ein mehrschichtiges Icon-Composer-Icon (hell/dunkel/getönt/klar) ist ein offener Punkt.
 
+## Fertige App laden
+
+Jeder Push auf `main`, der `macos/`, `engine/` oder den Workflow ändert, baut die App per GitHub Actions (Workflow *Auracaster macOS app*, Runner `macos-26`, Xcode 26). Ohne eigenes Xcode:
+
+1. Im Repo auf **Actions** → *Auracaster macOS app* → den neuesten grünen Lauf öffnen.
+2. Unten unter **Artifacts** `Auracaster-macOS` herunterladen (GitHub-Login nötig; Artefakte bleiben 30 Tage).
+3. Entpacken – darin liegt `Auracaster-macOS.zip`, das nochmal entpacken – und `Auracaster.app` nach `/Programme` ziehen.
+4. Die App ist nur ad-hoc signiert (nicht notarisiert). Quarantäne entfernen, sonst meldet Gatekeeper „beschädigt“:
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/Auracaster.app
+   ```
+5. Beim ersten Start fragt macOS nach **Mikrofon** (Mikrofone/Audio-Interfaces als Quelle) und **Audio-Aufnahme** (Systemaudio/einzelne Apps per Process Tap). Beides erlauben; nachträglich unter *Systemeinstellungen → Datenschutz & Sicherheit → Mikrofon* bzw. *Bildschirm- & Systemaudioaufnahme*.
+6. Der Python-Helper `auracaster_helper.py` liegt bereits im Bundle (`Contents/Resources`). Für den echten Dongle-Betrieb trotzdem die Python-Umgebung aus [Build](#build), Schritt 2, anlegen und in den Einstellungen den Pfad zu `.venv/bin/python` eintragen.
+
+Hinweis: Weil die Signatur bei jedem Build neu ad-hoc erzeugt wird, kann macOS die Berechtigungen nach einem Update erneut abfragen.
+
 ## Build
 
 Voraussetzungen: macOS 26 oder neuer (Ziel: macOS 27), Xcode 26+, [XcodeGen](https://github.com/yonaskolb/XcodeGen), Python ≥ 3.11.

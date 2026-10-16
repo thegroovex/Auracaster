@@ -22,8 +22,10 @@ enum CoreAudioHelpers {
         var addr = Self.address(selector, scope: scope)
         var value = initial
         var size = UInt32(MemoryLayout<T>.size)
-        try checkCA(AudioObjectGetPropertyData(object, &addr, 0, nil, &size, &value),
-                    "AudioObjectGetPropertyData(\(selector))")
+        let status = withUnsafeMutablePointer(to: &value) { ptr in
+            AudioObjectGetPropertyData(object, &addr, 0, nil, &size, UnsafeMutableRawPointer(ptr))
+        }
+        try checkCA(status, "AudioObjectGetPropertyData(\(selector))")
         return value
     }
 
