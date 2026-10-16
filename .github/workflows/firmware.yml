@@ -1,0 +1,124 @@
+name: Auracaster dongle firmware
+
+# Builds the Zephyr LE Audio broadcast controller (HCI H4 over USB CDC ACM)
+# for the nice!nano-compatible "Pro Micro nRF52840" dongle and uploads the
+# UF2 files for the three possible bootloader layouts as artifact
+# "auracaster-dongle-uf2". See firmware/README.md.
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'firmware/**'
+      - '.github/workflows/firmware.yml'
+  pull_request:
+    paths:
+      - 'firmware/**'
+      - '.github/workflows/firmware.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auracaster-firmware-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  WS: ${{ github.workspace }}/../zws
+  ZEPHYR_TOOLCHAIN_VARIANT: zephyr
+
+jobs:
+  build:
+    name: Build UF2 (promicro_nrf52840 / nice!nano)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Prepare west workspace
+        run: |
+          set -euo pipefail
+          mkdir -p "$WS"
+          cp -r firmware "$WS/auracaster-fw"
+          pip install --quiet west
+          cd "$WS"
+          west init -l auracaster-fw
+          west update --narrow -o=--depth=1
+          pip install --quiet -r zephyr/scripts/requirements-base.txt
+          echo "SDK_VERSION=$(cat zephyr/SDK_VERSION)" >> "$GITHUB_ENV"
+
+      - name: Cache Zephyr SDK
+        id: sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/zephyr-sdk-${{ env.SDK_VERSION }}
+          key: zephyr-sdk-${{ env.SDK_VERSION }}-linux-x86_64-arm
+
+      - name: Install Zephyr SDK (minimal + arm-zephyr-eabi)
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          base="https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v${SDK_VERSION}"
+          cd ~
+          curl -fsSL "$base/zephyr-sdk-${SDK_VERSION}_linux-x86_64_minimal.tar.xz" | tar xJ
+          mkdir -p "zephyr-sdk-${SDK_VERSION}/gnu"
+          curl -fsSL "$base/toolchain_gnu_linux-x86_64_arm-zephyr-eabi.tar.xz" | tar xJ -C "zephyr-sdk-${SDK_VERSION}/gnu"
+          "zephyr-sdk-${SDK_VERSION}/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc" --version | head -1
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          export ZEPHYR_SDK_INSTALL_DIR="$HOME/zephyr-sdk-${SDK_VERSION}"
+          cd "$WS"
+          # S140 v6.1.1 (original nice!nano bootloader): app at 0x26000
+          west build -p always -b promicro_nrf52840/nrf52840/uf2 -d build/s140v6 auracaster-fw
+          # S140 v7.x bootloaders: app at 0x27000
+          west build -p always -b promicro_nrf52840/nrf52840/uf2 -d build/s140v7 auracaster-fw \
+            -- -DEXTRA_DTC_OVERLAY_FILE=sdv7.overlay
+          # bootloader without SoftDevice ("SoftDevice: not found"): app at 0x1000
+          west build -p always -b promicro_nrf52840/nrf52840 -d build/nosd auracaster-fw
+
+      - name: Check and collect UF2 files
+        run: |
+          set -euo pipefail
+          cd "$WS"
+          chk=auracaster-fw/scripts/uf2info.py
+          dist="${GITHUB_WORKSPACE}/dist"
+          mkdir -p "$dist"
+          python3 $chk build/s140v6/zephyr/zephyr.uf2 --expect-start 0x26000
+          python3 $chk build/s140v7/zephyr/zephyr.uf2 --expect-start 0x27000
+          python3 $chk build/nosd/zephyr/zephyr.uf2   --expect-start 0x1000
+          cp build/s140v6/zephyr/zephyr.uf2 "$dist/auracaster-dongle-s140v6-0x26000.uf2"
+          cp build/s140v7/zephyr/zephyr.uf2 "$dist/auracaster-dongle-s140v7-0x27000.uf2"
+          cp build/nosd/zephyr/zephyr.uf2   "$dist/auracaster-dongle-nosd-0x1000.uf2"
+          cp build/s140v6/zephyr/zephyr.hex "$dist/auracaster-dongle-s140v6-0x26000.hex"
+          {
+            echo "Auracaster Dongle firmware"
+            echo "commit:  ${GITHUB_SHA}"
+            echo "zephyr:  $(cd zephyr && cat VERSION | tr '\n' ' ')"
+            echo "sdk:     ${SDK_VERSION}"
+            echo "board:   promicro_nrf52840 (nice!nano v2 compatible)"
+            echo "hci:     H4 over USB CDC ACM (Bumble: serial:/dev/cu.usbmodem...)"
+            echo
+            echo "Which file? Open INFO_UF2.TXT on the bootloader drive:"
+            echo "  SoftDevice: S140 version 6.x.x -> auracaster-dongle-s140v6-0x26000.uf2"
+            echo "  SoftDevice: S140 version 7.x.x -> auracaster-dongle-s140v7-0x27000.uf2"
+            echo "  SoftDevice: not found          -> auracaster-dongle-nosd-0x1000.uf2"
+            echo
+            for f in "$dist"/*.uf2; do python3 $chk "$f"; done
+            grep -E '^CONFIG_(BT_CTLR_TX_PWR_DBM|BT_CTLR_ADV_ISO_STREAM_MAX|BT_CTLR_ISO_TX_BUFFERS|BT_CTLR_ISO_TX_BUFFER_SIZE|CDC_ACM_SERIAL_(VID|PID|PRODUCT_STRING))=' \
+              build/s140v6/zephyr/.config
+          } > "$dist/BUILDINFO.txt"
+          cat "$dist/BUILDINFO.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: auracaster-dongle-uf2
+          path: dist/
+          if-no-files-found: error
+          retention-days: 90

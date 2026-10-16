@@ -36,7 +36,7 @@ Commands (one JSON object per line):
     {"cmd": "shutdown", "id": 5}
 
 Events (one JSON object per line):
-    {"event": "ready", "version": "...", "transport": "usb:0"}
+    {"event": "ready", "version": "...", "transport": "serial:/dev/cu.usbmodem...,resync"}
     {"event": "ack", "id": 1}
     {"event": "error", "id": 1, "message": "..."}
     {"event": "status", "state": "idle|starting|live|stopping|error", ...}
@@ -44,9 +44,18 @@ Events (one JSON object per line):
     {"event": "broadcast_found", "name": "...", "broadcast_id": 123, ...}
     {"event": "scan_complete", "count": 3}
 
+Controller transport (--transport, default "auto"):
+    auto                 look for the Auracaster dongle (firmware/, Zephyr HCI H4 over
+                         USB CDC ACM, product string "Auracaster Dongle", 2fe3:0004)
+                         and open it as serial:/dev/cu.usbmodem...,resync;
+                         falls back to usb:0 when no dongle is found
+    serial:/dev/cu.usbmodemXXXX[,resync]   the dongle (or any H4 UART controller)
+    usb:0 / usb:VID:PID  a USB HCI (H2) controller. NOTE: Zephyr's hci_usb sample
+                         has no ISO data path, it cannot be used for Auracast.
+
 Example (manual test without the app):
     mkfifo /tmp/auracaster.pcm
-    python engine/auracaster_helper.py --transport usb:0
+    python engine/auracaster_helper.py --transport auto
     > {"cmd":"start","id":1,"audio":{"input":"silence"}}
 """
 
@@ -98,6 +107,40 @@ logger = logging.getLogger('auracaster.helper')
 # Protocol output
 # -----------------------------------------------------------------------------
 _stdout_lock = threading.Lock()
+
+
+# USB identity of the Auracaster dongle firmware (firmware/prj.conf)
+DONGLE_PRODUCT = 'Auracaster Dongle'
+DONGLE_VID_PID = (0x2FE3, 0x0004)
+
+
+def find_dongle_serial_port() -> str | None:
+    """Return the serial device of a connected Auracaster dongle, if any."""
+    try:
+        from serial.tools import list_ports  # type: ignore  # pylint: disable=E0401
+    except ImportError:  # pragma: no cover
+        return None
+    candidates = []
+    for port in list_ports.comports():
+        product = port.product or ''
+        if product.startswith(DONGLE_PRODUCT) or (port.vid, port.pid) == DONGLE_VID_PID:
+            device = port.device
+            # macOS: use the call-out device, /dev/tty.* blocks on carrier detect
+            if device.startswith('/dev/tty.usbmodem'):
+                device = '/dev/cu.' + device[len('/dev/tty.') :]
+            candidates.append((not product.startswith(DONGLE_PRODUCT), device))
+    return sorted(candidates)[0][1] if candidates else None
+
+
+def resolve_transport(spec: str) -> str:
+    """Map "auto" to the dongle's serial port (with HCI resync), else usb:0."""
+    if spec != 'auto':
+        return spec
+    device = find_dongle_serial_port()
+    if device is None:
+        logger.warning('no Auracaster dongle found, falling back to usb:0')
+        return 'usb:0'
+    return f'serial:{device},resync'
 
 
 def emit(event: str, **fields: Any) -> None:
@@ -664,6 +707,7 @@ async def handle_command(engine: Engine, message: dict[str, Any]) -> bool:
 
 
 async def main_async(args: argparse.Namespace) -> None:
+    args.transport = resolve_transport(args.transport)
     engine = Engine(args.transport, args.device_name, args.device_address)
     queue: asyncio.Queue[str | None] = asyncio.Queue()
     start_stdin_reader(asyncio.get_running_loop(), queue)
@@ -692,7 +736,12 @@ async def main_async(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description='Auracaster Bumble engine helper')
-    parser.add_argument('--transport', default='usb:0', help='Bumble transport, e.g. usb:0')
+    parser.add_argument(
+        '--transport',
+        default='auto',
+        help='Bumble transport: auto (Auracaster dongle, else usb:0), '
+        'serial:/dev/cu.usbmodemXXXX,resync or usb:0',
+    )
     parser.add_argument('--device-name', default=DEFAULT_DEVICE_NAME)
     parser.add_argument('--device-address', default=DEFAULT_DEVICE_ADDRESS)
     parser.add_argument('--log-level', default='INFO')

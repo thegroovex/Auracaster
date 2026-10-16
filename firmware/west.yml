@@ -1,0 +1,18 @@
+# west manifest for the Auracaster dongle firmware.
+# Pins Zephyr and fetches only the modules an nRF52840 BLE controller needs.
+manifest:
+  self:
+    path: auracaster-fw
+  remotes:
+    - name: zephyrproject-rtos
+      url-base: https://github.com/zephyrproject-rtos
+  projects:
+    - name: zephyr
+      remote: zephyrproject-rtos
+      revision: v4.4.2
+      import:
+        name-allowlist:
+          - cmsis_6
+          - hal_nordic
+          - mbedtls
+          - tf-psa-crypto
