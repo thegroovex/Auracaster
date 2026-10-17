@@ -11,6 +11,14 @@ on:
       - 'macos/**'
       - 'engine/**'
       - '.github/workflows/auracaster-macos.yml'
+      - '!**/*.md'           # docs-only changes skip the build
+  pull_request:
+    types: [ opened, synchronize, reopened, labeled ]
+    paths:
+      - 'macos/**'
+      - 'engine/**'
+      - '.github/workflows/auracaster-macos.yml'
+      - '!**/*.md'
   workflow_dispatch:
 
 permissions:
@@ -21,6 +29,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  engine:
+    name: Python helper - syntax + import check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m py_compile engine/auracaster_helper.py
+
   build:
     name: Build Auracaster.app (Xcode 26+)
     runs-on: macos-26
@@ -40,8 +59,25 @@ jobs:
           echo "::notice title=Xcode::$(xcodebuild -version | tr '\n' ' ') / $(xcrun --show-sdk-version --sdk macosx 2>/dev/null)"
           sw_vers
 
-      - name: Install XcodeGen
-        run: brew install xcodegen
+      - name: Cache XcodeGen + DerivedData
+        uses: actions/cache@v4
+        with:
+          path: |
+            macos/build
+            ~/xcodegen
+          key: dd-macos26-${{ hashFiles('macos/project.yml') }}-${{ github.run_id }}
+          restore-keys: |
+            dd-macos26-${{ hashFiles('macos/project.yml') }}-
+            dd-macos26-
+
+      - name: Install XcodeGen (cached binary, no brew update)
+        shell: bash
+        run: |
+          if [ ! -x ~/xcodegen/bin/xcodegen ]; then
+            curl -fsSL -o /tmp/xg.zip https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip
+            unzip -q /tmp/xg.zip -d /tmp/xg && rm -rf ~/xcodegen && mv /tmp/xg/xcodegen ~/xcodegen
+          fi
+          echo "$HOME/xcodegen/bin" >> "$GITHUB_PATH"
 
       - name: Generate Xcode project
         run: cd macos && xcodegen generate
@@ -53,7 +89,7 @@ jobs:
           cd macos
           xcodebuild -project Auracaster.xcodeproj -scheme Auracaster -configuration Release \
             -destination 'platform=macOS' -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO build 2>&1 | tee build.log || {
+            CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO build 2>&1 | tee build.log || {
             # surface compiler errors as annotations so they can be read through the API
             grep -E 'error:' build.log | sort -u | head -n 50 | while IFS= read -r line; do
               echo "::error title=xcodebuild::${line#$GITHUB_WORKSPACE/}"
@@ -65,6 +101,7 @@ jobs:
           done
 
       - name: Sign ad-hoc and package
+        if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'release')
         shell: bash
         run: |
           APP=macos/build/Build/Products/Release/Auracaster.app
@@ -74,6 +111,7 @@ jobs:
           ls -l Auracaster-macOS.zip
 
       - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'release')
         with:
           name: Auracaster-macOS
           path: Auracaster-macOS.zip
@@ -85,3 +123,13 @@ jobs:
           name: build-log
           path: macos/build.log
           retention-days: 7
+
+  result:
+    name: CI result
+    if: always()
+    needs: [ engine, build ]
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          echo "engine=${{ needs.engine.result }} build=${{ needs.build.result }}"
+          [ "${{ needs.engine.result }}" = success ] && [ "${{ needs.build.result }}" = success ]
