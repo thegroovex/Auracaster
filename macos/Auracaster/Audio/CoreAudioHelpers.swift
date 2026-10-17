@@ -98,6 +98,19 @@ enum CoreAudioHelpers {
         ((try? value(object, kAudioProcessPropertyIsRunningOutput, initial: UInt32(0))) ?? 0) != 0
     }
 
+    /// True while the process is actively recording (v0.1.3: pass-through detection).
+    static func isRunningInput(_ object: AudioObjectID) -> Bool {
+        ((try? value(object, kAudioProcessPropertyIsRunningInput, initial: UInt32(0))) ?? 0) != 0
+    }
+
+    /// Number of streams of a device in one scope (diagnostics).
+    static func streamCount(_ device: AudioDeviceID, scope: AudioObjectPropertyScope) -> Int {
+        var addr = Self.address(kAudioDevicePropertyStreams, scope: scope)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(device, &addr, 0, nil, &size) == noErr else { return 0 }
+        return Int(size) / MemoryLayout<AudioStreamID>.size
+    }
+
     static func allDevices() throws -> [AudioDeviceID] {
         var addr = Self.address(kAudioHardwarePropertyDevices)
         var size: UInt32 = 0

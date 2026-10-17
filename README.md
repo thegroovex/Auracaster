@@ -87,15 +87,15 @@ Stellschrauben von LE Audio direkt:
 |---|---|---|
 | **LC3-Framelänge** | Wie viel Audio pro Paket gesammelt wird | 10 ms, experimentell 7,5 ms (*Ultra-Low β*) |
 | **Presentation Delay** | Puffer, nach dem alle Empfänger synchron abspielen | einstellbar pro Preset: 10 / 25 / 40 ms |
-| **RTN** (Retransmissions) | Wie oft jedes Paket wiederholt wird – mehr = robuster, aber mehr Funkzeit | 2 (seit 0.1.2 auch bei *Hohe Qualität*) |
-| **Max. Transport Latency** | Obergrenze für den Funkweg beim BIG-Aufbau | 10 / 20 ms |
+| **RTN** (Retransmissions) | Wie oft jedes Paket wiederholt wird – mehr = robuster, aber mehr Funkzeit | 2 (seit 0.1.2 auch bei *Hohe Qualität*), *Ultra-Low* 3 |
+| **Max. Transport Latency** | Obergrenze für den Funkweg beim BIG-Aufbau | 10 / 20 ms (*Ultra-Low* seit 0.1.3: 20 ms) |
 
 | Preset | Format | Frame | Delay | Bitrate | Geschätzte Latenz* |
 |---|---|---|---|---|---|
 | **Kompatibel** | 24_2 (24 kHz) | 10 ms | 40 ms | 48 kbit/s | ≈ 50 ms – Pflichtformat, läuft auf jedem Auracast-Empfänger |
 | **Ausgewogen** (Standard) | 48_2 | 10 ms | 25 ms | 80 kbit/s | ≈ 35 ms – im Realtest stabil |
 | **Hohe Qualität** | 48_4 | 10 ms | 40 ms | 96 kbit/s | ≈ 50 ms – seit 0.1.2 mit RTN 2 (vorher zu viel Funklast für den Dongle) |
-| **Ultra-Low β** | 48 kHz | 7,5 ms | 10 ms | 80 kbit/s | ≈ 18 ms – experimentell, nicht jeder Empfänger spielt 7,5 ms / 10 ms Delay ab |
+| **Ultra-Low β** | 48 kHz | 7,5 ms | 20 ms | 80 kbit/s | ≈ 28 ms – experimentell, seit 0.1.3 mit 20 ms Delay und RTN 3 (10 ms puffert auf Empfängern); nicht jeder Empfänger spielt 7,5 ms ab |
 
 \* **Schätzung**, keine Messung: Framelänge + Presentation Delay. Dazu kommen ca. 30 ms Jitter-Puffer zwischen Mac-Aufnahme
 und Funk (seit 0.1.1, verhindert Aussetzer) sowie die Verarbeitung im Empfänger. Echte Messwerte folgen.

@@ -290,23 +290,66 @@ final class CapturePlanTests: XCTestCase {
         ]
     }
 
-    /// v0.1.1 echo bug: system audio must be ONE global tap on ONE device, without per-app taps.
-    func testSystemAudioIsExactlyOneGlobalTap() {
+    /// v0.1.3 echo fix: system audio = ONE tap that is a process MIXDOWN (like the
+    /// clean app path), never a global tap, never combined with other taps.
+    func testSystemAudioIsOneProcessMixdownWithoutOwnOrDriverProcesses() {
         let plan = CapturePlanner.systemAudio(ownPID: ownPID, extraExcluded: [ownPID], processes: processes, defaultOutput: speakers)
         XCTAssertEqual(plan.tapCount, 1)
+        guard case .systemMix(let included) = plan.kind else { return XCTFail("expected process mixdown, got \(plan.kind)") }
+        XCTAssertNil(plan.deviceUID, "process mixdown is not bound to a device stream")
+        // Safari + its WebKit helper + normal apps are in the mix, exactly once
+        XCTAssertEqual(included.sorted(), [600, 601, 800])
+        XCTAssertEqual(Set(included).count, included.count)
+        // own process and virtual driver helpers are never tapped
+        XCTAssertFalse(included.contains(ownPID))
+        XCTAssertEqual(plan.excludedPIDs.filter { $0 == ownPID }.count, 1, "own process excluded exactly once")
+        for pid: pid_t in [700, 701, 702] {
+            XCTAssertTrue(plan.excludedPIDs.contains(pid), "driver helper \(pid) excluded")
+        }
+        XCTAssertFalse(plan.excludedPIDs.contains(800), "\"david\" must not match the Avid marker")
+    }
+
+    func testOwnHelperProcessesAreExcluded() {
+        let list: [CapturePlanner.TapProcess] = [
+            .init(pid: 900, bundleID: nil, path: "/Users/x/Library/Application Support/Auracaster/venv/bin/python3.12", responsiblePID: ownPID),
+            .init(pid: 901, bundleID: "de.groovex.Auracaster.Helper", path: nil),
+            .init(pid: 601, bundleID: "com.apple.Safari", path: "/Applications/Safari.app/Contents/MacOS/Safari"),
+        ]
+        let mix = CapturePlanner.systemAudioMix(ownPID: ownPID, extraExcluded: [], processes: list)
+        XCTAssertEqual(mix.includedPIDs, [601])
+        XCTAssertEqual(mix.excluded.map(\.reason), [.ownApp, .ownApp])
+    }
+
+    /// A background process that records and plays at the same time re-plays
+    /// audio (loopback/monitor) → second, delayed copy. Apps keep their audio.
+    func testPassThroughProcessesAreExcludedButAppsAreKept() {
+        let list: [CapturePlanner.TapProcess] = [
+            .init(pid: 300, bundleID: "com.example.mirrord", path: "/usr/libexec/mirrord",
+                  isRunningInput: true, isRunningOutput: true, ownerIsRegularApp: false),
+            .init(pid: 301, bundleID: "us.zoom.xos", path: "/Applications/zoom.us.app/Contents/MacOS/zoom.us",
+                  isRunningInput: true, isRunningOutput: true, ownerIsRegularApp: true),
+            // Safari's GPU process during a web call: attributed to Safari (a regular app) → kept
+            .init(pid: 302, bundleID: "com.apple.WebKit.GPU", path: nil, responsiblePID: 601,
+                  isRunningInput: true, isRunningOutput: true, ownerIsRegularApp: true),
+            .init(pid: 303, bundleID: "com.apple.WebKit.GPU", path: nil, isRunningOutput: true),
+            .init(pid: 303, bundleID: "com.apple.WebKit.GPU", path: nil, isRunningOutput: true),
+        ]
+        let mix = CapturePlanner.systemAudioMix(ownPID: ownPID, extraExcluded: [], processes: list)
+        XCTAssertEqual(mix.includedPIDs, [301, 302, 303], "duplicates removed")
+        XCTAssertEqual(mix.excluded.map(\.process.pid), [300])
+        XCTAssertEqual(mix.excluded.first?.reason, .passThrough)
+        let text = CapturePlanner.describe(mix)
+        XCTAssertTrue(text.hasPrefix("3 Prozess(e): "), text)
+        XCTAssertTrue(text.contains("mirrord[300]"), text)
+        XCTAssertTrue(text.contains("nimmt auf + spielt ab"), text)
+    }
+
+    func testGlobalTapOnlyAsFallbackWithoutKnownProcesses() {
+        let plan = CapturePlanner.systemAudio(ownPID: ownPID, extraExcluded: [], processes: [processes[0]], defaultOutput: speakers)
         XCTAssertEqual(plan.kind, .global)
         XCTAssertEqual(plan.deviceUID, "BuiltInSpeakerDevice")
-        XCTAssertEqual(plan.stream, 0)
-        XCTAssertEqual(plan.excludedPIDs.filter { $0 == ownPID }.count, 1, "own process excluded exactly once")
-        // virtual driver helpers re-play audio → excluded
-        XCTAssertTrue(plan.excludedPIDs.contains(700))
-        XCTAssertTrue(plan.excludedPIDs.contains(701))
-        XCTAssertTrue(plan.excludedPIDs.contains(702))
-        // normal apps (Safari + its WebKit helper) stay in the global mix – and are NOT tapped separately
-        XCTAssertFalse(plan.excludedPIDs.contains(600))
-        XCTAssertFalse(plan.excludedPIDs.contains(601))
-        XCTAssertFalse(plan.excludedPIDs.contains(800), "\"david\" must not match the Avid marker")
-        if case .processes = plan.kind { XCTFail("system audio must not be a process mixdown") }
+        XCTAssertEqual(plan.excludedPIDs, [ownPID])
+        XCTAssertEqual(plan.tapCount, 1)
     }
 
     func testApplicationPlanNeverContainsOwnProcessOrDuplicates() {
@@ -320,6 +363,7 @@ final class CapturePlanTests: XCTestCase {
                                               subDeviceUIDs: ["BuiltInSpeakerDevice", "AirBeamTVDevice"])
         XCTAssertEqual(CapturePlanner.clockDeviceUID(defaultOutput: multi), "BuiltInSpeakerDevice")
         XCTAssertEqual(CapturePlanner.clockDeviceUID(defaultOutput: speakers), "BuiltInSpeakerDevice")
+        // fallback global tap: the device the user listens to, once
         let plan = CapturePlanner.systemAudio(ownPID: ownPID, extraExcluded: [], processes: [], defaultOutput: multi)
         XCTAssertEqual(plan.deviceUID, multi.uid, "tap the device the user listens to, once")
     }

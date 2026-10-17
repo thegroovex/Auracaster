@@ -51,7 +51,7 @@ jobs:
           python-version: '3.12'
       - name: Syntax
         run: |
-          python -m py_compile engine/auracaster_helper.py engine/tests/test_pipeline.py engine/tests/test_firmware_info.py
+          python -m py_compile engine/auracaster_helper.py engine/tests/test_pipeline.py engine/tests/test_firmware_info.py engine/tests/test_transport_retry.py
           bash -n engine/setup-engine.sh macos/Installer/install.sh macos/Installer/Gatekeeper-Fix.command
       - name: pip install . into a fresh venv (what setup-engine.sh does)
         run: |
@@ -67,6 +67,8 @@ jobs:
         run: /tmp/engine/bin/python engine/tests/test_pipeline.py
       - name: Firmware identity tests (HCI vendor command 0xFF50)
         run: /tmp/engine/bin/python engine/tests/test_firmware_info.py
+      - name: Transport retry tests (EBUSY, port vanishes while the dongle reboots)
+        run: /tmp/engine/bin/python engine/tests/test_transport_retry.py
 
   firmware:
     name: Dongle + repeater firmware (bundled into the app)

@@ -36,7 +36,7 @@ enum BroadcastPreset: String, CaseIterable, Identifiable, Codable, Sendable {
         case .compatible: "24_2 · 24 kHz · 10 ms – läuft auf jedem Auracast-Empfänger"
         case .balanced: "48_2 · 48 kHz · 10 ms · 25 ms Puffer – empfohlen"
         case .highQuality: "48_4 · 48 kHz · 10 ms · 40 ms Puffer – höchste Bitrate"
-        case .ultraLow: "Experimentell: 7,5-ms-Frames, 10 ms Puffer – nicht jeder Empfänger spielt das ab"
+        case .ultraLow: "Experimentell: 7,5-ms-Frames · 20 ms Puffer · 3 Wiederholungen – mehr Reserve für den Funkempfang (vorher 10 ms: Knackser/Puffern), nicht jeder Empfänger spielt 7,5 ms ab"
         }
     }
 
@@ -74,7 +74,10 @@ enum BroadcastPreset: String, CaseIterable, Identifiable, Codable, Sendable {
         case .compatible: 40_000
         case .balanced: 25_000
         case .highQuality: 40_000
-        case .ultraLow: 10_000
+        // v0.1.3: was 10 ms. Host and dongle delivered 100 % (266.7 SDU/s) and the
+        // receiver still buffered → no headroom on the receiving side. 20 ms gives
+        // the earbuds time for the retransmissions; still the lowest latency preset.
+        case .ultraLow: 20_000
         }
     }
 
@@ -86,7 +89,9 @@ enum BroadcastPreset: String, CaseIterable, Identifiable, Codable, Sendable {
         // v0.1.1 used 4: 2 BIS × 5 transmissions × 120 B did not fit the
         // nRF52840's airtime next to EA/PA (stalled completions, buffering).
         case .highQuality: 2
-        case .ultraLow: 2
+        // v0.1.3: 3 (controller chose NSE 3 / PTO 0 with RTN 2 + 10 ms latency).
+        // 75-byte SDUs: 2 BIS × 4 subevents still fit the 7.5 ms ISO interval.
+        case .ultraLow: 3
         }
     }
 
@@ -96,7 +101,9 @@ enum BroadcastPreset: String, CaseIterable, Identifiable, Codable, Sendable {
         case .compatible: 10
         case .balanced: 20
         case .highQuality: 20 // was 65 (ISO interval 50 ms, BN 5 – bursty)
-        case .ultraLow: 10
+        // v0.1.3: 20 (was 10) so the controller may use pre-transmission (PTO ≥ 1)
+        // and more subevents instead of NSE 3 / PTO 0.
+        case .ultraLow: 20
         }
     }
 

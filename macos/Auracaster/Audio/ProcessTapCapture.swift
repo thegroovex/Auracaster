@@ -2,6 +2,7 @@ import AppKit
 import AudioToolbox
 import CoreAudio
 import Foundation
+import Synchronization
 
 /// System-wide / per-app capture via Core Audio Process Taps (macOS 14.2+;
 /// `CATapDescription` + `AudioHardwareCreateProcessTap`), plus direct capture
@@ -37,6 +38,13 @@ final class ProcessTapCapture: AudioCapture {
 
     /// What the last `prepare` tapped (diagnostics).
     private(set) var lastPlan: TapPlan?
+    /// Log text for the last plan: tapped processes, exclusions (v0.1.3).
+    private(set) var planSummary = ""
+    /// Input streams of the private tap aggregate (expected: 1 = the tap).
+    private(set) var aggregateInputStreams = 0
+    /// Called (any thread) when the system-audio process list changes while sending.
+    var onSystemMixChange: (@Sendable (String) -> Void)?
+    private var mixUpdater: SystemMixUpdater?
     /// Channels of the tap stream (the aggregate may list the clock device's inputs first).
     private var tapChannels: UInt32 = 2
     /// Reused per IO cycle: only the tap's buffers (no allocation on the RT thread).
@@ -81,32 +89,83 @@ final class ProcessTapCapture: AudioCapture {
         return String(decoding: bytes, as: UTF8.self)
     }
 
+    struct ProcessEntry: Sendable {
+        var process: CapturePlanner.TapProcess
+        var object: AudioObjectID
+    }
+
+    /// Every Core Audio client with what the planner needs to decide (v0.1.3).
+    static func processSnapshot() -> [ProcessEntry] {
+        CoreAudioHelpers.processObjects().compactMap { object -> ProcessEntry? in
+            guard let pid = CoreAudioHelpers.pid(ofProcessObject: object) else { return nil }
+            let app = NSRunningApplication(processIdentifier: pid)
+            let responsible = AppProcessResolver.responsiblePID(for: pid)
+            var regular = app?.activationPolicy == .regular
+            if !regular, let responsible, responsible != pid {
+                regular = NSRunningApplication(processIdentifier: responsible)?.activationPolicy == .regular
+            }
+            let path = AppProcessResolver.executablePath(of: pid)
+            let bundleID = CoreAudioHelpers.bundleID(ofProcessObject: object)
+            let process = CapturePlanner.TapProcess(
+                pid: pid, bundleID: bundleID, path: path,
+                name: app?.localizedName ?? bundleID ?? path.map { ($0 as NSString).lastPathComponent },
+                responsiblePID: responsible,
+                isRunningInput: CoreAudioHelpers.isRunningInput(object),
+                isRunningOutput: CoreAudioHelpers.isRunningOutput(object),
+                ownerIsRegularApp: regular
+            )
+            return ProcessEntry(process: process, object: object)
+        }
+    }
+
+    /// "1 Eingangs-Stream · IO-Puffer 1 · gelesen: Tap-Puffer 1"
+    var aggregateSummary: String {
+        let seen = tapBuffers.observedBuffers.load(ordering: .relaxed)
+        return "\(aggregateInputStreams) Eingangs-Stream(s) im Aggregat · \(seen) Puffer pro IO-Zyklus · Tap-Kanäle \(tapChannels)"
+    }
+
     @discardableResult
     func prepare(target: CaptureTarget) throws -> AudioStreamBasicDescription {
         stop()
         do {
             switch target {
             case .systemAudio(let excludedPIDs):
-                // ONE global tap on the default output device – never combined with
-                // per-app taps (v0.1.1 echo bug), virtual-driver helpers excluded.
+                // v0.1.3: a MIXDOWN of every audio client (like the clean app path),
+                // not a global tap – own processes, virtual-driver helpers and
+                // pass-through processes excluded, list refreshed while sending.
                 let output = Self.defaultOutputInfo()
-                let processes = CoreAudioHelpers.processObjects().compactMap { object -> CapturePlanner.TapProcess? in
-                    guard let pid = CoreAudioHelpers.pid(ofProcessObject: object) else { return nil }
-                    return CapturePlanner.TapProcess(pid: pid, bundleID: CoreAudioHelpers.bundleID(ofProcessObject: object),
-                                                      path: AppProcessResolver.executablePath(of: pid))
-                }
+                let ownPID = ProcessInfo.processInfo.processIdentifier
+                let snapshot = Self.processSnapshot()
+                let processes = snapshot.map(\.process)
                 let plan = CapturePlanner.systemAudio(
-                    ownPID: ProcessInfo.processInfo.processIdentifier, extraExcluded: excludedPIDs,
-                    processes: processes, defaultOutput: output
+                    ownPID: ownPID, extraExcluded: excludedPIDs, processes: processes, defaultOutput: output
                 )
                 lastPlan = plan
-                let excluded = plan.excludedPIDs.compactMap { try? CoreAudioHelpers.processObject(for: $0) }
-                let description = CATapDescription(stereoGlobalTapButExcludeProcesses: excluded)
-                if let uid = plan.deviceUID {
-                    description.deviceUID = uid
-                    description.stream = plan.stream.map { UInt($0) }
+                let mix = CapturePlanner.systemAudioMix(ownPID: ownPID, extraExcluded: excludedPIDs, processes: processes)
+                switch plan.kind {
+                case .systemMix(let pids):
+                    let objects = snapshot.filter { pids.contains($0.process.pid) }.map(\.object)
+                    planSummary = "Systemaudio als Prozess-Mix (kein globaler Tap) · " + CapturePlanner.describe(mix)
+                    let description = CATapDescription(stereoMixdownOfProcesses: objects)
+                    try createTap(description, clockOutput: output)
+                    let updater = SystemMixUpdater(
+                        tapID: tapID, uuid: description.uuid, ownPID: ownPID, extraExcluded: excludedPIDs,
+                        current: pids, onChange: onSystemMixChange
+                    )
+                    updater.start()
+                    mixUpdater = updater
+                default:
+                    // Fallback: no audio client known yet → one global tap on the default output.
+                    planSummary = "global (Fallback: noch kein Audio-Prozess bekannt), Gerät \(plan.deviceUID ?? "alle") · "
+                        + CapturePlanner.describe(mix)
+                    let excluded = plan.excludedPIDs.compactMap { try? CoreAudioHelpers.processObject(for: $0) }
+                    let description = CATapDescription(stereoGlobalTapButExcludeProcesses: excluded)
+                    if let uid = plan.deviceUID {
+                        description.deviceUID = uid
+                        description.stream = plan.stream.map { UInt($0) }
+                    }
+                    try createTap(description, clockOutput: output)
                 }
-                try createTap(description, clockOutput: output)
             case .applications(let pids):
                 // Main process + helpers (WebKit GPU/WebContent, "… Helper", XPC).
                 var processes: [AudioObjectID] = []
@@ -120,6 +179,7 @@ final class ProcessTapCapture: AudioCapture {
                     throw AudioCaptureError.appNotPlaying(name ?? "Die App")
                 }
                 lastPlan = TapPlan(kind: .processes(pids), excludedPIDs: [], deviceUID: nil, stream: nil)
+                planSummary = "App-Prozesse: \(processes.count) Core-Audio-Objekt(e) (\(pids.count) App(s))"
                 try createTap(CATapDescription(stereoMixdownOfProcesses: processes), clockOutput: Self.defaultOutputInfo())
             case .inputDevice(let uid):
                 guard let device = CoreAudioHelpers.device(withUID: uid) else {
@@ -150,6 +210,8 @@ final class ProcessTapCapture: AudioCapture {
     }
 
     func stop() {
+        mixUpdater?.stop()
+        mixUpdater = nil
         if let ioProcID, ioDeviceID != AudioObjectID(kAudioObjectUnknown) {
             AudioDeviceStop(ioDeviceID, ioProcID)
             AudioDeviceDestroyIOProcID(ioDeviceID, ioProcID)
@@ -223,6 +285,7 @@ final class ProcessTapCapture: AudioCapture {
                     "AudioHardwareCreateAggregateDevice")
         aggregateID = device
         ioDeviceID = device
+        aggregateInputStreams = CoreAudioHelpers.streamCount(device, scope: kAudioObjectPropertyScopeInput)
 
         // Keep the TAP's format (the aggregate's first input stream may be the
         // clock device's own input); only the sample rate follows the clock device.
@@ -248,6 +311,7 @@ final class ProcessTapCapture: AudioCapture {
                 // Real-time thread: hand the buffer straight to the consumer.
                 let all = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
                 guard all.count > 0 else { return }
+                selected.observedBuffers.store(all.count, ordering: .relaxed)
                 var list: UnsafePointer<AudioBufferList> = inputData
                 if isTap && all.count > tapBufferCount {
                     // Only the tap's buffers – never the clock device's own input.
@@ -272,6 +336,96 @@ final class ProcessTapCapture: AudioCapture {
 /// Two-buffer AudioBufferList reused on the IO thread (only the tap's buffers).
 private final class TapBufferBox: @unchecked Sendable {
     let list = AudioBufferList.allocate(maximumBuffers: 2)
+    /// Buffers per IO cycle in the aggregate's input list (diagnostics).
+    let observedBuffers = Atomic<Int>(0)
 
     deinit { free(list.unsafeMutablePointer) }
+}
+
+/// Keeps the system-audio process mixdown current while sending (v0.1.3):
+/// apps that start playing later are added, pass-through processes removed.
+/// Re-evaluates on Core Audio's process-list notification and once a second
+/// (recording state has no notification), then updates the EXISTING tap via
+/// `kAudioTapPropertyDescription` – no new tap, no gap, no second stream.
+final class SystemMixUpdater: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "de.groovex.auracaster.capture.mix", qos: .utility)
+    private let tapID: AudioObjectID
+    private let uuid: UUID
+    private let ownPID: pid_t
+    private let extraExcluded: [pid_t]
+    private let onChange: (@Sendable (String) -> Void)?
+    // queue-confined state
+    private var current: [pid_t]
+    private var names: [pid_t: String] = [:]
+    private var stopped = false
+    private var timer: DispatchSourceTimer?
+    private var listener: AudioObjectPropertyListenerBlock?
+
+    init(tapID: AudioObjectID, uuid: UUID, ownPID: pid_t, extraExcluded: [pid_t], current: [pid_t],
+         onChange: (@Sendable (String) -> Void)?) {
+        self.tapID = tapID
+        self.uuid = uuid
+        self.ownPID = ownPID
+        self.extraExcluded = extraExcluded
+        self.current = current
+        self.onChange = onChange
+    }
+
+    func start() {
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 1, repeating: 1.0, leeway: .milliseconds(200))
+        timer.setEventHandler { [weak self] in self?.refresh() }
+        timer.resume()
+        self.timer = timer
+        var addr = CoreAudioHelpers.address(kAudioHardwarePropertyProcessObjectList)
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in self?.refresh() }
+        if AudioObjectAddPropertyListenerBlock(CoreAudioHelpers.systemObject, &addr, queue, block) == noErr {
+            listener = block
+        }
+    }
+
+    func stop() {
+        timer?.cancel()
+        timer = nil
+        if let listener {
+            var addr = CoreAudioHelpers.address(kAudioHardwarePropertyProcessObjectList)
+            AudioObjectRemovePropertyListenerBlock(CoreAudioHelpers.systemObject, &addr, queue, listener)
+        }
+        listener = nil
+        queue.sync { stopped = true }
+    }
+
+    private func refresh() {
+        guard !stopped else { return }
+        let snapshot = ProcessTapCapture.processSnapshot()
+        let mix = CapturePlanner.systemAudioMix(ownPID: ownPID, extraExcluded: extraExcluded,
+                                                processes: snapshot.map(\.process))
+        for entry in snapshot { names[entry.process.pid] = entry.process.displayName }
+        let pids = mix.includedPIDs
+        guard !pids.isEmpty, Set(pids) != Set(current) else { return }
+        let added = pids.filter { !current.contains($0) }
+        let removed = current.filter { !pids.contains($0) }
+        let objects = snapshot.filter { pids.contains($0.process.pid) }.map(\.object)
+        let description = CATapDescription(stereoMixdownOfProcesses: objects)
+        description.name = "Auracaster"
+        description.uuid = uuid
+        description.isPrivate = true
+        description.muteBehavior = .unmuted
+        var reference = description
+        var addr = CoreAudioHelpers.address(kAudioTapPropertyDescription)
+        let status = withUnsafeMutablePointer(to: &reference) { pointer in
+            AudioObjectSetPropertyData(tapID, &addr, 0, nil, UInt32(MemoryLayout<CATapDescription>.size), pointer)
+        }
+        current = pids // also on failure: report once, do not retry every second
+        func label(_ pid: pid_t) -> String { "\(names[pid] ?? "pid \(pid)")[\(pid)]" }
+        var text = status == noErr ? "Tap aktualisiert" : "Tap-Aktualisierung fehlgeschlagen (OSStatus \(status))"
+        if !added.isEmpty { text += " · neu: " + added.map(label).joined(separator: ", ") }
+        if !removed.isEmpty { text += " · entfernt: " + removed.map(label).joined(separator: ", ") }
+        let passThrough = mix.excluded.filter { $0.reason == .passThrough }
+        if !passThrough.isEmpty {
+            text += " · ausgeschlossen (nimmt auf + spielt ab): " + passThrough.map { label($0.process.pid) }.joined(separator: ", ")
+        }
+        text += " · jetzt \(pids.count) Prozess(e)"
+        onChange?(text)
+    }
 }

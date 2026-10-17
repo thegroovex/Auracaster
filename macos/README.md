@@ -2,7 +2,7 @@
 
 Auracaster sendet Audio vom Mac – das gesamte Systemaudio, einzelne Apps (z. B. Ableton Live, Musik) oder ein Mikrofon/Audio-Interface – als **Auracast™-Broadcast** (Bluetooth LE Audio, Broadcast Isochronous Stream). Jedes Auracast-fähige Gerät in Reichweite kann zuhören: Hörgeräte, Earbuds, Lautsprecher, Smartphones.
 
-Ziele: niedrige Latenz (Preset *Ultra-Low* ≈ 18 ms), eine native Mac-Oberfläche für macOS 27 „Golden Gate“ und eine Menüleisten-Steuerung im Stil des Kontrollzentrums.
+Ziele: niedrige Latenz (Preset *Ultra-Low* ≈ 28 ms), eine native Mac-Oberfläche für macOS 27 „Golden Gate“ und eine Menüleisten-Steuerung im Stil des Kontrollzentrums.
 
 > Status: **v0.1.2**. v0.1.1 lief auf echter Hardware mit *Kompatibel*/*Ausgewogen* (200 SDUs/s bestätigt), *Hohe Qualität* (RTN 4) überforderte den Dongle. 0.1.2 bringt den Dongle-Assistenten, den Echo-Fix für „Systemaudio“ und HQ mit RTN 2 – automatisch getestet, auf Hardware noch nicht.
 

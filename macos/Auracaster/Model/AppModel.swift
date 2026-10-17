@@ -306,6 +306,9 @@ final class AppModel {
                 }
                 // 1. Tap/aggregate anlegen und Format ermitteln.
                 let capture = ProcessTapCapture()
+                capture.onSystemMixChange = { [weak self] text in
+                    Task { @MainActor in self?.appendLog(text) }
+                }
                 let format = try capture.prepare(target: source.target)
                 captureFormat = capture.formatDescription
                 appendLog("Quelle „\(source.name)“: \(capture.formatDescription)")
@@ -318,8 +321,8 @@ final class AppModel {
                     downmixToMono: mono
                 )
                 if mono { appendLog("Mono-Broadcast: L+R → 1 BIS") }
-                if let plan = capture.lastPlan {
-                    appendLog("Tap: \(plan.kind == .global ? "global (Systemaudio)" : "App-Prozesse"), Gerät \(plan.deviceUID ?? "alle"), ausgeschlossen: \(plan.excludedPIDs.count) Prozess(e)")
+                if !capture.planSummary.isEmpty {
+                    appendLog("Tap: \(capture.planSummary)")
                 }
                 transport.gain = Float(volume)
                 request.audioInput = transport.helperInputSpec
@@ -334,6 +337,11 @@ final class AppModel {
                     transport.write(buffer, frameCount: frames, format: format)
                 }
                 startCaptureMeter(transport)
+                Task { @MainActor [weak self, weak capture] in
+                    try? await Task.sleep(for: .seconds(1))
+                    guard let capture, capture.isRunning else { return }
+                    self?.appendLog("Aufnahme: \(capture.aggregateSummary)")
+                }
                 if request.recordPath != nil {
                     appendLog("WAV-Mitschnitt vor dem Encoder: \(request.recordPath ?? "")")
                 }

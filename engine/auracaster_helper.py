@@ -105,7 +105,7 @@ import traceback
 from collections.abc import AsyncGenerator
 from typing import Any
 
-HELPER_VERSION = '0.1.2'
+HELPER_VERSION = '0.1.3'
 PROTOCOL_VERSION = 2
 
 # -----------------------------------------------------------------------------
@@ -288,6 +288,42 @@ def resolve_transport(spec: str) -> str:
         return 'usb:0'
     logger.info('Auracaster dongle: %s', device)
     return f'serial:{device},resync'
+
+
+OPEN_RETRY_SECONDS = 6.0
+
+
+def classify_open_error(error: BaseException) -> str | None:
+    """'busy' (EBUSY), 'gone' (ENOENT/ENXIO: port vanished while the dongle
+    reboots) or None (do not retry)."""
+    text = str(error)
+    code = getattr(error, 'errno', None)
+    if code == errno.EBUSY or 'Resource busy' in text or 'Errno 16' in text:
+        return 'busy'
+    if code in (errno.ENOENT, errno.ENXIO) or 'No such file' in text or 'Errno 2]' in text or 'Errno 6]' in text:
+        return 'gone'
+    return None
+
+
+def serial_port_path(transport_name: str) -> str | None:
+    """'/dev/cu.usbmodem2101' for 'serial:/dev/cu.usbmodem2101,resync'."""
+    if not transport_name.startswith('serial:'):
+        return None
+    return transport_name[len('serial:'):].split(',', 1)[0] or None
+
+
+async def wait_for_serial_port(transport_name: str, deadline: float, poll: float = 0.1) -> bool:
+    """Waits until the serial port exists again (plus a short settle time)."""
+    path = serial_port_path(transport_name)
+    if path is None:
+        await asyncio.sleep(0.5)
+        return False
+    while time.monotonic() < deadline:
+        if os.path.exists(path):
+            await asyncio.sleep(0.3)  # let the CDC-ACM device finish enumerating
+            return True
+        await asyncio.sleep(poll)
+    return False
 
 
 # -----------------------------------------------------------------------------
@@ -762,19 +798,29 @@ class Engine:
             logger.info('opening transport %s', self.transport_name)
             transport = None
             last_error: Exception | None = None
-            # A previous helper may still be closing the port ([Errno 16] Resource busy).
-            for attempt in range(10):
+            # A previous helper may still be closing the port ([Errno 16] Resource
+            # busy), and the dongle reboots when the port is closed, so the port
+            # vanishes for a moment ([Errno 2] No such file) – v0.1.3: wait for it.
+            deadline = time.monotonic() + OPEN_RETRY_SECONDS
+            attempt = 0
+            while True:
+                attempt += 1
                 try:
                     transport = await bumble.transport.open_transport(self.transport_name)
                     break
                 except Exception as error:  # pylint: disable=broad-except
                     last_error = error
-                    busy = isinstance(error, OSError) and error.errno == errno.EBUSY
-                    busy = busy or 'Resource busy' in str(error) or 'Errno 16' in str(error)
-                    if not busy:
+                    kind = classify_open_error(error)
+                    if kind is None or time.monotonic() >= deadline:
                         break
-                    logger.info('transport busy, retry %d/10', attempt + 1)
-                    await asyncio.sleep(0.5)
+                    if kind == 'gone':
+                        logger.info('transport gone (dongle restarting?), waiting for the port, retry %d', attempt)
+                        await wait_for_serial_port(self.transport_name, deadline)
+                        if self.transport_spec == 'auto':
+                            self.transport_name = resolve_transport('auto')
+                    else:
+                        logger.info('transport busy, retry %d', attempt)
+                        await asyncio.sleep(0.5)
             if transport is None:
                 error = last_error or RuntimeError('unknown')
                 raise RuntimeError(

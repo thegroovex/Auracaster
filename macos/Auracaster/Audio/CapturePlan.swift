@@ -2,6 +2,18 @@ import Foundation
 
 /// Decides what exactly gets tapped (pure logic, unit-tested).
 ///
+/// v0.1.3 – "Systemaudio" echo, still present in v0.1.2 with ONE device-bound
+/// global tap (Safari video: heard twice, slightly offset; the "Safari" app
+/// source, a process mixdown, was clean; muting the Mac changed nothing; data
+/// rate exact → the second copy is already in the captured signal). A global
+/// tap takes *every* process's output, including processes that re-play audio
+/// they record (loopback/monitor helpers of virtual drivers, screen-mirroring
+/// tools, …). System audio is therefore now built like the working app path:
+/// one stereo MIXDOWN of an explicit process list (every Core Audio client
+/// except our own processes, virtual-driver helpers and background processes
+/// that record and play at the same time), kept up to date while sending.
+/// The plain global tap remains only as a fallback when no process is known.
+///
 /// v0.1.1 bug ("Systemaudio kommt doppelt mit kleiner Verschiebung"): the
 /// global tap was not bound to a device, and the IOProc read the FIRST input
 /// buffer of the tap aggregate – which is the clock device's own input when
@@ -20,6 +32,9 @@ struct TapPlan: Equatable, Sendable {
         case global
         /// stereo mixdown of exactly these processes (app source)
         case processes([pid_t])
+        /// system audio (v0.1.3): stereo mixdown of every audio client except
+        /// `excludedPIDs`, refreshed while sending
+        case systemMix([pid_t])
     }
 
     var kind: Kind
@@ -37,6 +52,42 @@ enum CapturePlanner {
         var pid: pid_t
         var bundleID: String?
         var path: String?
+        /// Display name for the log ("Safari", "com.apple.WebKit.GPU", …).
+        var name: String? = nil
+        /// Process macOS attributes this one to (XPC helpers → their app).
+        var responsiblePID: pid_t? = nil
+        var isRunningInput = false
+        var isRunningOutput = false
+        /// The process or the app responsible for it is a regular (Dock) app.
+        var ownerIsRegularApp = false
+
+        var displayName: String {
+            if let name, !name.isEmpty { return name }
+            if let path { return (path as NSString).lastPathComponent }
+            return bundleID ?? "pid \(pid)"
+        }
+    }
+
+    enum ExclusionReason: String, Sendable {
+        case ownApp = "Auracaster"
+        case requested = "angefordert"
+        case virtualDriver = "Treiber/Loopback"
+        /// background process recording and playing at once (re-plays what it records)
+        case passThrough = "nimmt auf + spielt ab"
+    }
+
+    struct Excluded: Equatable, Sendable {
+        var process: TapProcess
+        var reason: ExclusionReason
+    }
+
+    /// Result of the system-audio process selection.
+    struct SystemMix: Equatable, Sendable {
+        var included: [TapProcess]
+        var excluded: [Excluded]
+
+        var includedPIDs: [pid_t] { included.map(\.pid) }
+        var excludedPIDs: [pid_t] { excluded.map(\.process.pid) }
     }
 
     struct DeviceInfo: Equatable, Sendable {
@@ -66,17 +117,74 @@ enum CapturePlanner {
         return virtualDriverMarkers.contains { haystack.contains($0) }
     }
 
-    /// System audio: one global tap on the default output device.
+    static func isOwnProcess(_ process: TapProcess, ownPID: pid_t) -> Bool {
+        if process.pid == ownPID || process.responsiblePID == ownPID { return true }
+        let haystack = [process.bundleID, process.path].compactMap { $0?.lowercased() }.joined(separator: " ")
+        return haystack.contains("de.groovex.auracaster") || haystack.contains("/auracaster.app/")
+            || haystack.contains("auracaster_helper")
+    }
+
+    /// v0.1.3 system audio: which Core Audio clients go into the mixdown.
+    /// Every known client is included (not only the ones playing right now, so
+    /// nothing is cut off when a process starts playing), except
+    ///   * Auracaster itself and its helpers (own PID, responsible PID, bundle),
+    ///   * PIDs the caller excludes,
+    ///   * helpers of virtual audio drivers / loopback tools (markers),
+    ///   * background processes (not a regular app, nor attributed to one)
+    ///     that record AND play at the same time – they pass audio through.
+    static func systemAudioMix(ownPID: pid_t, extraExcluded: [pid_t], processes: [TapProcess]) -> SystemMix {
+        var mix = SystemMix(included: [], excluded: [])
+        var seen = Set<pid_t>()
+        for process in processes where !seen.contains(process.pid) {
+            seen.insert(process.pid)
+            let reason: ExclusionReason?
+            if isOwnProcess(process, ownPID: ownPID) {
+                reason = .ownApp
+            } else if extraExcluded.contains(process.pid) {
+                reason = .requested
+            } else if isVirtualDriverHelper(process) {
+                reason = .virtualDriver
+            } else if process.isRunningInput && process.isRunningOutput && !process.ownerIsRegularApp {
+                reason = .passThrough
+            } else {
+                reason = nil
+            }
+            if let reason {
+                mix.excluded.append(Excluded(process: process, reason: reason))
+            } else {
+                mix.included.append(process)
+            }
+        }
+        return mix
+    }
+
+    /// System audio plan: a process mixdown (v0.1.3). Falls back to ONE global
+    /// tap on the default output device only when no process is known yet.
     static func systemAudio(
         ownPID: pid_t, extraExcluded: [pid_t], processes: [TapProcess], defaultOutput: DeviceInfo?
     ) -> TapPlan {
-        var excluded: [pid_t] = []
-        for pid in [ownPID] + extraExcluded where !excluded.contains(pid) { excluded.append(pid) }
-        for process in processes where isVirtualDriverHelper(process) && !excluded.contains(process.pid) {
-            excluded.append(process.pid)
+        let mix = systemAudioMix(ownPID: ownPID, extraExcluded: extraExcluded, processes: processes)
+        if !mix.included.isEmpty {
+            return TapPlan(kind: .systemMix(mix.includedPIDs), excludedPIDs: mix.excludedPIDs, deviceUID: nil, stream: nil)
         }
+        var excluded: [pid_t] = []
+        for pid in [ownPID] + extraExcluded + mix.excludedPIDs where !excluded.contains(pid) { excluded.append(pid) }
         return TapPlan(kind: .global, excludedPIDs: excluded,
                        deviceUID: defaultOutput?.uid, stream: defaultOutput == nil ? nil : 0)
+    }
+
+    /// One log line: "12 Prozesse: Safari, com.apple.WebKit.GPU (spielt) … · ausgeschlossen: …"
+    static func describe(_ mix: SystemMix, limit: Int = 24) -> String {
+        func label(_ process: TapProcess) -> String {
+            "\(process.displayName)[\(process.pid)]\(process.isRunningOutput ? "▶︎" : "")\(process.isRunningInput ? "●" : "")"
+        }
+        // playing processes first – they are the interesting ones
+        let sorted = mix.included.filter(\.isRunningOutput) + mix.included.filter { !$0.isRunningOutput }
+        var text = "\(mix.included.count) Prozess(e): " + sorted.prefix(limit).map(label).joined(separator: ", ")
+        if sorted.count > limit { text += ", … (+\(sorted.count - limit))" }
+        let excluded = mix.excluded.map { "\(label($0.process)) (\($0.reason.rawValue))" }
+        text += " · ausgeschlossen: " + (excluded.isEmpty ? "keine" : excluded.joined(separator: ", "))
+        return text
     }
 
     /// App source: mixdown of the app's processes (own process never included).
