@@ -243,3 +243,11 @@ diese Zahlen in Phasen stark an, ist das die Zeitfenster-Kollision aus [Grenzen]
   jedes gültige SDU sofort an den passenden eigenen BIS (gleiche Sequenznummer).
 - Pro BIS dürfen höchstens 2 SDUs im Controller warten; mehr wird verworfen, damit
   die Verzögerung durch Taktdrift nicht wächst.
+
+## Neu in 0.1.2
+
+- **Flashen und Aktualisieren mit der App:** *Einstellungen → Dongle & Repeater → Dongle-Assistent*, Rolle **Repeater** wählen, Board anstecken.
+  Ab 0.1.2 genügt dafür ein 1200-Baud-Touch (kein Reset-Pin mehr); ein Repeater mit 0.1.0 braucht einmalig den Doppel-Reset.
+- **Status für die App** auf der USB-Konsole: `@AURA id …` beim Öffnen des Ports, `@AURA status …` alle 2 s (Zustand, Quelle, RSSI,
+  Relay-Name, Empfangs-/Sendezähler). Die App zeigt das an, solange der Repeater per USB am Mac steckt.
+- Empfehlung für den Sender bleibt: Latenz ≤ 20 ms und RTN 1–2 – in der App das Preset **Ausgewogen**.

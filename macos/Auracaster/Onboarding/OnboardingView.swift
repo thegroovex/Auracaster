@@ -16,7 +16,7 @@ struct OnboardingView: View {
     var isShowcase = false
 
     static let guideURL = URL(string: "https://github.com/thegroovex/Auracaster#installation-schritt-f%C3%BCr-schritt")!
-    static let flashGuideURL = URL(string: "https://github.com/thegroovex/Auracaster#4-dongle-flashen-einmalig")!
+    static let flashGuideURL = URL(string: "https://github.com/thegroovex/Auracaster#4-dongle-einrichten--macht-die-app")!
     static let firmwareURL = URL(string: "https://github.com/thegroovex/Auracaster/releases/latest")!
 
     private let steps = ["Willkommen", "Dongle", "Engine & Audio", "Los geht’s"]

@@ -104,7 +104,7 @@ final class ProcessTapCapture: AudioCapture {
                 let description = CATapDescription(stereoGlobalTapButExcludeProcesses: excluded)
                 if let uid = plan.deviceUID {
                     description.deviceUID = uid
-                    description.stream = plan.stream.map { NSNumber(value: $0) }
+                    description.stream = plan.stream.map { UInt($0) }
                 }
                 try createTap(description, clockOutput: output)
             case .applications(let pids):
@@ -239,7 +239,7 @@ final class ProcessTapCapture: AudioCapture {
         let bytesPerFrame = Int(format.mBytesPerFrame)
         let isTap = aggregateID != AudioObjectID(kAudioObjectUnknown)
         let nonInterleaved = (format.mFormatFlags & AudioFormatFlags(kAudioFormatFlagIsNonInterleaved)) != 0
-        let tapBuffers = nonInterleaved ? Int(tapChannels) : 1
+        let tapBufferCount = nonInterleaved ? Int(tapChannels) : 1
         let selected = tapBuffers
 
         var procID: AudioDeviceIOProcID?
@@ -249,9 +249,9 @@ final class ProcessTapCapture: AudioCapture {
                 let all = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
                 guard all.count > 0 else { return }
                 var list: UnsafePointer<AudioBufferList> = inputData
-                if isTap && all.count > tapBuffers {
+                if isTap && all.count > tapBufferCount {
                     // Only the tap's buffers – never the clock device's own input.
-                    let range = CapturePlanner.tapBufferRange(totalBuffers: all.count, tapBuffers: tapBuffers)
+                    let range = CapturePlanner.tapBufferRange(totalBuffers: all.count, tapBuffers: tapBufferCount)
                     let target = selected.list
                     target.unsafeMutablePointer.pointee.mNumberBuffers = UInt32(min(range.count, 2))
                     for (slot, index) in range.prefix(2).enumerated() { target[slot] = all[index] }

@@ -23,7 +23,7 @@
   <img src="docs/images/studio-dark.png" alt="Auracaster – Studio-Fenster im Dunkelmodus" width="900">
 </p>
 
-> **Status: frühe Version (0.1).** App, Updater, Installer und Dongle-Firmware sind fertig und werden automatisch gebaut.
+> **Status: frühe Version (0.1.2).** App, Updater, Installer, Dongle-Assistent und Dongle-Firmware sind fertig und werden automatisch gebaut.
 > Der Funkpfad (Mac → Dongle → Empfänger) wird gerade auf echter Hardware getestet. Was schon geht und was nicht, steht
 > ehrlich in den Tabellen unten.
 
@@ -87,14 +87,14 @@ Stellschrauben von LE Audio direkt:
 |---|---|---|
 | **LC3-Framelänge** | Wie viel Audio pro Paket gesammelt wird | 10 ms, experimentell 7,5 ms (*Ultra-Low β*) |
 | **Presentation Delay** | Puffer, nach dem alle Empfänger synchron abspielen | einstellbar pro Preset: 10 / 25 / 40 ms |
-| **RTN** (Retransmissions) | Wie oft jedes Paket wiederholt wird – mehr = robuster, aber mehr Funkzeit | 2 bzw. 4 |
-| **Max. Transport Latency** | Obergrenze für den Funkweg beim BIG-Aufbau | 10 / 20 / 65 ms |
+| **RTN** (Retransmissions) | Wie oft jedes Paket wiederholt wird – mehr = robuster, aber mehr Funkzeit | 2 (seit 0.1.2 auch bei *Hohe Qualität*) |
+| **Max. Transport Latency** | Obergrenze für den Funkweg beim BIG-Aufbau | 10 / 20 ms |
 
 | Preset | Format | Frame | Delay | Bitrate | Geschätzte Latenz* |
 |---|---|---|---|---|---|
 | **Kompatibel** | 24_2 (24 kHz) | 10 ms | 40 ms | 48 kbit/s | ≈ 50 ms – Pflichtformat, läuft auf jedem Auracast-Empfänger |
-| **Ausgewogen** | 48_2 | 10 ms | 25 ms | 80 kbit/s | ≈ 35 ms |
-| **Hohe Qualität** (Standard) | 48_4 | 10 ms | 40 ms | 96 kbit/s | ≈ 50 ms – mit Galaxy-Buds getestet |
+| **Ausgewogen** (Standard) | 48_2 | 10 ms | 25 ms | 80 kbit/s | ≈ 35 ms – im Realtest stabil |
+| **Hohe Qualität** | 48_4 | 10 ms | 40 ms | 96 kbit/s | ≈ 50 ms – seit 0.1.2 mit RTN 2 (vorher zu viel Funklast für den Dongle) |
 | **Ultra-Low β** | 48 kHz | 7,5 ms | 10 ms | 80 kbit/s | ≈ 18 ms – experimentell, nicht jeder Empfänger spielt 7,5 ms / 10 ms Delay ab |
 
 \* **Schätzung**, keine Messung: Framelänge + Presentation Delay. Dazu kommen ca. 30 ms Jitter-Puffer zwischen Mac-Aufnahme
@@ -139,7 +139,7 @@ Keine Vorkenntnisse nötig. Plane 10 Minuten ein (plus einmal Dongle flashen).
 > ```sh
 > curl -fsSL https://raw.githubusercontent.com/thegroovex/Auracaster/main/macos/Installer/install.sh | bash
 > ```
-> Dann direkt weiter mit [Schritt 4](#4-dongle-flashen-einmalig).
+> Dann direkt weiter mit [Schritt 4](#4-dongle-einrichten--macht-die-app).
 
 ### 2. App in „Programme“ ziehen
 
@@ -170,9 +170,23 @@ Danach begrüßt dich der **Willkommens-Assistent**:
 
 Ohne Engine läuft Auracaster im **Simulationsmodus** – alles ist klickbar, aber es wird nicht gefunkt.
 
-### 4. Dongle flashen (einmalig)
+### 4. Dongle einrichten – macht die App
 
-<p align="center"><img src="docs/images/guide-flash.png" alt="Dongle flashen: zweimal Reset, Laufwerk erscheint, UF2-Datei draufziehen" width="900"></p>
+Im Willkommens-Assistenten (und jederzeit unter *Einstellungen → Dongle & Repeater → Dongle-Assistent*) wählst du die **Rolle**
+(*Sender-Dongle* oder *Repeater*) und steckst das Board an. Der **Dongle-Assistent** erledigt den Rest: Bootloader starten,
+`INFO_UF2.TXT` lesen, passende Firmware-Variante wählen, aufspielen, Version prüfen. Ohne Terminal, ohne Admin-Passwort
+(macOS fragt einmal nach Zugriff auf *Wechseldatenträger*).
+
+| Board | Was passiert | Taste nötig? |
+|---|---|---|
+| **Fabrikneu** (nur Bootloader, keine App) | startet direkt im Bootloader → Laufwerk erscheint → App flasht sofort | nein |
+| **Auracaster ab 0.1.2** | App schickt es per Befehl in den Bootloader und aktualisiert | nein |
+| **Arduino / CircuitPython** (Adafruit-Bootloader) | 1200-Baud-Touch → Bootloader → App flasht (Arduino: per seriellem DFU) | nein (auf echter Hardware noch ungetestet) |
+| **Auracaster 0.1.0 / 0.1.1**, ZMK, Demo-Firmware | kein Fernzugang zum Bootloader – die App zeigt eine animierte Anleitung: **RST zweimal schnell an GND tippen**; sie erkennt das Laufwerk und macht weiter | **einmalig ja** |
+
+<p align="center"><img src="docs/images/guide-flash.png" alt="Notfalls von Hand: zweimal Reset, Laufwerk erscheint, UF2-Datei draufziehen" width="900"></p>
+
+<details><summary><b>Ohne App flashen (von Hand)</b></summary>
 
 1. Dongle per USB-C an den Mac stecken und **zweimal schnell Reset** drücken. Hat dein Board keinen Taster: die Pins **RST** und **GND** zweimal kurz mit einer Pinzette/einem Draht verbinden.
 2. Ein Laufwerk erscheint (meist **NICENANO**). Darin `INFO_UF2.TXT` öffnen und die Zeile **`SoftDevice:`** lesen.
@@ -184,7 +198,9 @@ Ohne Engine läuft Auracaster im **Simulationsmodus** – alles ist klickbar, ab
    | `S140 version 7.x` | `auracaster-dongle-s140v7-0x27000.uf2` |
    | `not found` | `auracaster-dongle-nosd-0x1000.uf2` |
 
+   Für einen Repeater dieselbe Variante als `auracaster-repeater-….uf2`.
 4. Das Laufwerk verschwindet von selbst (eine Meldung „nicht korrekt ausgeworfen“ ist harmlos). Die LED blinkt einmal pro Sekunde – der Dongle ist bereit.
+</details>
 
 Hintergründe (Bootloader, LED-Codes, Selbstbau der Firmware): [firmware/README.md](firmware/README.md).
 
@@ -196,7 +212,7 @@ Sobald die App den Dongle benutzt, leuchtet die LED dauerhaft.
 ### 6. Ersten Stream starten
 
 1. Die **Quelle** steht oben in der Toolbar – voreingestellt ist *Systemaudio* (alles, was der Mac abspielt). Alternativ eine **App** (auch Safari/Chrome; Apps, die gerade spielen, sind markiert) oder einen **Eingang** (Mikrofon/Interface).
-2. Im Studio optional den **Namen** ändern (so heißt der Sender auf den Empfängern) und ein **Preset** wählen – *Hohe Qualität* ist der empfohlene Standard.
+2. Im Studio optional den **Namen** ändern (so heißt der Sender auf den Empfängern) und ein **Preset** wählen – *Ausgewogen* ist der empfohlene Standard.
 3. Oben rechts **Senden** klicken – der Knopf wird rot: **On Air**.
 
 ### 7. Empfänger verbinden
@@ -237,7 +253,7 @@ eine kaputte/alte Installation – v0.1.0 installierte Bumble unvollständig (`c
 <details><summary><b>„Kein Dongle gefunden“</b></summary>
 
 - Anderes USB-C-Kabel probieren – viele Kabel laden nur und übertragen keine Daten.
-- Erscheint beim Einstecken ein Laufwerk *NICENANO*, ist der Dongle im Bootloader: Firmware draufziehen (Schritt 4).
+- Erscheint beim Einstecken ein Laufwerk *NICENANO*, ist der Dongle im Bootloader: den Dongle-Assistenten öffnen – er flasht automatisch (Schritt 4).
 - Blinkt die LED gar nicht, die Firmware noch einmal flashen (evtl. die andere SoftDevice-Variante).
 - Im Terminal prüfen: `ls /dev/cu.usbmodem*` sollte einen Eintrag zeigen.
 - *Einstellungen → Diagnose → Dongle prüfen* zeigt, ob der Controller antwortet (Version, ISO-Broadcaster, gefundene Ports).
@@ -252,11 +268,20 @@ Bei Earbuds läuft die Suche oft über das gekoppelte Smartphone (Android 15+/On
 
 <details><summary><b>Kein Ton / Ton stottert oder klingt „roboterhaft“</b></summary>
 
-- **Firmware ab 0.1.1** flashen und **Hohe Qualität** wählen. Bleibt es stumm: *Kompatibel* (24 kHz, Pflichtformat aller Empfänger).
+- **Firmware ab 0.1.2** (Dongle-Assistent) und Preset **Ausgewogen**. Bleibt es stumm: *Kompatibel* (24 kHz, Pflichtformat aller Empfänger).
+- *Einstellungen → Diagnose* → **Bestätigt / Soll**: unter 95 % schafft der Dongle das Preset nicht (Funkzeit) → *Ausgewogen* oder *Übertragung → Mono senden*.
+- Kleine Aussetzer: *Einstellungen → Übertragung → Stabilität* auf 60 oder 100 ms stellen (mehr Puffer, etwas mehr Verzögerung).
 - *Ultra-Low β* (7,5 ms) spielen nicht alle Empfänger ab – Samsung-Handys synchronisieren teils, bleiben aber stumm.
-- *Einstellungen → Diagnose*: „SDUs/s gesendet · bestätigt“ sollte bei Stereo/10 ms ≈ 200 · 200 sein; steigen *Unterläufe*, kommt zu wenig Audio vom Mac.
+- *Einstellungen → Diagnose*: „SDUs/s gesendet · bestätigt“ sollte bei Stereo/10 ms ≈ 200 · 200 sein; steigen *Unterläufe*, kommt zu wenig Audio vom Mac. „Aufnahme (Mac)“ sollte ≈ 100 % zeigen.
 - **WAV-Mitschnitt vor dem Encoder** einschalten, kurz senden, Datei im Logs-Ordner anhören: klingt sie sauber, liegt das Problem auf der Funkstrecke, sonst bei der Aufnahme.
 - WLAN im 2,4-GHz-Band und viele Bluetooth-Geräte in der Nähe kosten Funkzeit.
+</details>
+
+<details><summary><b>Systemaudio klingt doppelt / mit Echo</b></summary>
+
+In 0.1.1 konnte „Systemaudio“ doppelt mit kleiner Verschiebung ankommen – vor allem mit virtuellen Audiotreibern (Pro Tools Audio Bridge,
+AirBeamTV, Loopback …) oder Audio-Interfaces als Ausgabe. Ab 0.1.2 nimmt die App genau einen Tap am Standard-Ausgabegerät und schließt
+Hilfsprozesse solcher Treiber aus. Tritt es trotzdem auf: *Einstellungen → Diagnose → Protokoll kopieren* (Zeile „Tap: …“) und als Issue melden.
 </details>
 
 <details><summary><b>Safari/Chrome als Quelle: „spielt gerade kein Audio“</b></summary>
@@ -316,7 +341,7 @@ Lizenz: Apache-2.0 ([LICENSE](LICENSE)). Auracast™ ist eine Marke der Bluetoot
 **Auracaster** turns your Mac into an **Auracast™ (Bluetooth LE Audio broadcast) transmitter**: system audio, a single app or a microphone is
 LC3-encoded and broadcast through a ~€5 nRF52840 USB dongle to any number of hearing aids, earbuds and speakers – targeting ≈ 20 ms latency.
 **[Download the DMG](https://github.com/thegroovex/Auracaster/releases/latest/download/Auracaster-macOS.dmg)** (macOS 26+, Apple silicon), drag the app to
-Applications, allow it once in *System Settings → Privacy & Security → Open Anyway*, click *Set up engine* in the welcome assistant, flash the dongle by
-dragging the matching `.uf2` onto its bootloader drive, press **Send**. Or install everything without Gatekeeper prompts:
+Applications, allow it once in *System Settings → Privacy & Security → Open Anyway*, click *Set up engine* in the welcome assistant, plug in the
+dongle – the built-in dongle assistant installs the firmware (boards with firmware ≤ 0.1.1 need one double-tap of RST↔GND), press **Send**. Or install everything without Gatekeeper prompts:
 `curl -fsSL https://raw.githubusercontent.com/thegroovex/Auracaster/main/macos/Installer/install.sh | bash`. Early version: one stream today,
 more streams (languages) in progress. Built on [Google Bumble](https://github.com/google/bumble).

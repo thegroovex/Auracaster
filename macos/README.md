@@ -4,7 +4,7 @@ Auracaster sendet Audio vom Mac – das gesamte Systemaudio, einzelne Apps (z. B
 
 Ziele: niedrige Latenz (Preset *Ultra-Low* ≈ 18 ms), eine native Mac-Oberfläche für macOS 27 „Golden Gate“ und eine Menüleisten-Steuerung im Stil des Kontrollzentrums.
 
-> Status: **v0.1.1**. v0.1.0 sendete auf echter Hardware (Pro Micro nRF52840 → Galaxy S25 Ultra + Galaxy Buds: Ton hörbar, aber stotternd). v0.1.1 baut den Audio-Pfad controllergetaktet mit Jitter-Puffer neu auf – automatisch getestet, auf Hardware noch nicht gehört.
+> Status: **v0.1.2**. v0.1.1 lief auf echter Hardware mit *Kompatibel*/*Ausgewogen* (200 SDUs/s bestätigt), *Hohe Qualität* (RTN 4) überforderte den Dongle. 0.1.2 bringt den Dongle-Assistenten, den Echo-Fix für „Systemaudio“ und HQ mit RTN 2 – automatisch getestet, auf Hardware noch nicht.
 
 ## Architektur
 
@@ -39,7 +39,7 @@ Ziele: niedrige Latenz (Preset *Ultra-Low* ≈ 18 ms), eine native Mac-Oberfläc
 |---|---|---|
 | App | `Auracaster/App/AuracasterApp.swift` | `WindowGroup` (Hauptfenster), `MenuBarExtra` (.window-Stil), `Settings`; sauberes Beenden des Helpers |
 | Model | `Model/AppModel.swift` | Zentraler Zustand, Start/Stopp-Ablauf (Tap → FIFO → Helper → Capture) |
-| Model | `Model/BroadcastPreset.swift` | Presets: Ultra-Low (7,5 ms, 10 ms Delay), Ausgewogen (10 ms, 20 ms), Hohe Qualität (10 ms, 40 ms, 96 kbit/s) |
+| Model | `Model/BroadcastPreset.swift` | Presets: Kompatibel (24_2), Ausgewogen (48_2, Standard), Hohe Qualität (48_4, RTN 2, interleaved), Ultra-Low β (7,5 ms) |
 | Engine | `Engine/BroadcastEngine.swift` | Protokoll `BroadcastEngine`, Events, Status-Typen |
 | Engine | `Engine/BumbleEngineClient.swift` | Startet `auracaster_helper.py` als Subprozess, JSON Lines über stdin/stdout, stderr → Log |
 | Engine | `Engine/HelperProtocol.swift` | Wire-Format (Befehle/Events, snake_case) |
@@ -103,9 +103,36 @@ Zwischenstände: jeder Push auf `main` baut unter **Actions → Auracaster macOS
 | Baustein | Datei(en) | Aufgabe |
 |---|---|---|
 | Willkommens-Assistent | `Onboarding/OnboardingView.swift` | 4 Schritte (Was ist Auracaster → Dongle → Engine & Audio → erster Stream); erneut über *Hilfe → Einrichtungsassistent …* |
-| Dongle-Erkennung | `Onboarding/DongleDetector.swift` | IOKit: USB `2fe3:0004` („Auracaster Dongle“), UF2-Bootloader-Laufwerk (`INFO_UF2.TXT`), `/dev/cu.usbmodem*` |
+| Dongle-Erkennung | `Onboarding/DongleDetector.swift` | IOKit: USB `2fe3:0004` („Auracaster Dongle“), `2fe3:0005` (Repeater), UF2-Bootloader-Laufwerk (`INFO_UF2.TXT`), `/dev/cu.usbmodem*` |
 | Engine-Einrichtung | `Onboarding/EngineSetup.swift`, `../engine/setup-engine.sh` | Ein Klick: `uv` → Python 3.12-venv in `~/Library/Application Support/Auracaster/venv` → Bumble (Tarball dieses Repos, Tag = App-Version) + lc3py; stellt danach Engine *Bumble* + Transport `auto` ein. Kein Xcode/Homebrew/git nötig. `BumbleEngineClient` nimmt dieses venv automatisch, solange kein eigener Python-Pfad gesetzt ist. |
 | Updater | `Update/UpdateService.swift`, `Update/UpdateController.swift`, `Update/UpdateSheet.swift` | GitHub-Releases-API (`/releases/latest`), SemVer-Vergleich, Sheet mit Release-Notes, Download (ZIP bevorzugt, DMG möglich) mit Fortschritt, Entpacken (`ditto`/`hdiutil`), Prüfung von Bundle-ID und Signatur (`codesign --verify`), Austausch nach dem Beenden durch ein Hilfsskript (Backup + Rollback, `xattr -dr com.apple.quarantine`, Neustart). Menü *Auracaster → Nach Updates suchen …*, Menüleiste (⋯), Toolbar-Badge, Einstellung „Automatisch täglich prüfen“ (Standard an). |
+
+### Dongle-Assistent (ab 0.1.2)
+
+| Datei | Aufgabe |
+|---|---|
+| `Firmware/FirmwareCore.swift` | reine Logik (Unit-Tests): `INFO_UF2.TXT`-Parser, Variantenwahl, Firmware-Kennung (HCI `0xFF50`, `@AURA id`), Repeater-Status, Versionsvergleich, Quellenwahl Release/gebündelt, Manifest + SHA-256, UF2-Parser/-Prüfung, HCI-Rahmen, Nordic-Legacy-Serial-DFU |
+| `Firmware/SerialPort.swift`, `Firmware/BoardIO.swift` | POSIX-Seriell (DTR, 1200-Baud-Touch), IOKit-USB-Erkennung (VID/PID/Produkt je `/dev/cu.usbmodem*`), UF2-Laufwerke, Schreiben aufs Laufwerk, Dongle-/Repeater-Abfrage |
+| `Firmware/FirmwareCatalog.swift` | UF2 aus `Contents/Resources/Firmware` (offline) oder dem neuesten Release (`UpdateService`), Prüfung per `firmware-manifest.json`/`SHA256SUMS.txt` |
+| `Firmware/DongleAssistant.swift` | Ablauf: Engine trennen → Bootloader (vorhandenes Laufwerk / `0xFF51` / 1200-Baud-Touch / Anleitung) → Variante → laden + prüfen → schreiben bzw. serielles DFU → Neustart → Version prüfen → Engine verbinden; Beobachtungsmodus für neue Boards |
+| `Firmware/DongleAssistantView.swift` | UI (Willkommens-Assistent, Einstellungen, Toolbar-Hinweis „Firmware“), animierte Doppel-Reset-Anleitung, Repeater-Status + Aufstell-Tipps |
+
+Rechte: Die App ist nicht sandboxed; für `/dev/cu.*` braucht sie nichts, für das Bootloader-Laufwerk fragt macOS einmal nach
+*Wechseldatenträger* (`NSRemovableVolumesUsageDescription`). Kein Admin-Passwort.
+
+### Aufnahme und Diagnose (ab 0.1.2)
+
+- **Systemaudio = genau ein Tap**: `CapturePlanner` (`Audio/CapturePlan.swift`, Unit-Tests) baut einen globalen Tap, gebunden an das
+  Standard-Ausgabegerät (Stream 0), schließt den eigenen Prozess und Hilfsprozesse virtueller Treiber/Loopback-Tools aus; im IOProc werden
+  nur die Tap-Puffer weitergereicht (das Aggregat listet die Eingänge des Taktgeräts zuerst). App-Quellen bleiben ein Mixdown-Tap ihrer Prozesse.
+- **Pegelanzeige aus der Aufnahme** (`FifoPCMTransport.takeLevels`), nicht mehr aus dem Helper hinter der Funk-Taktung.
+- **Diagnose**: Aufnahmerate, FIFO-Verluste, Bestätigt/Soll in %, Stalls (mit Ursache im Protokoll), Puffer-Sprünge, längste Funk-Wartezeit, BIG-Parameter.
+- **Übertragung**: *Stabilität* (Jitter-Puffer 30/60/100 ms → `jitter_ms`), *Mono senden* (L+R → 1 BIS).
+
+### Tests
+
+`AuracasterTests` (Schema gleichen Namens) kompiliert `FirmwareCore.swift`, `UpdateService.swift` und `CapturePlan.swift` direkt – ohne Host-App.
+Die CI führt sie vor dem App-Build aus (`xcodebuild test -scheme AuracasterTests`).
 
 Warum kein Sparkle? Ohne Developer-ID und EdDSA-Schlüsselinfrastruktur bringt es wenig; per `URLSession` geladene Dateien bekommen
 ohnehin kein Quarantäne-Attribut, Updates lösen also kein Gatekeeper aus.

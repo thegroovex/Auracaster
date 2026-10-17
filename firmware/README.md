@@ -66,7 +66,43 @@ Hinweise:
   Doppel-Reset erreichbar.
 * Alle Dateien haben die UF2-Family-ID `0xADA52840` (nRF52840), die der Bootloader erwartet.
 
-## Flashen ohne Programmer
+## Flashen mit der App (Dongle-Assistent, ab 0.1.2)
+
+Die Mac-App flasht Dongle- und Repeater-Firmware selbst (*Willkommens-Assistent* bzw. *Einstellungen → Dongle & Repeater*).
+Wege in den Bootloader, wie die App sie nacheinander versucht:
+
+| Zustand des Boards | Weg | ohne Taste? |
+|---|---|---|
+| keine gültige App (fabrikneu) | Bootloader startet von selbst, Laufwerk erscheint | ja |
+| Auracaster ≥ 0.1.2, Dongle | HCI-Vendor-Befehl `0xFF51` → `GPREGRET = 0x57` + Soft-Reset | ja |
+| Auracaster ≥ 0.1.2, Dongle + Repeater | **1200-Baud-Touch**: Port mit 1200 Baud öffnen, schließen (DTR 1→0) | ja |
+| Arduino (Adafruit-nRF52-Core) | 1200-Baud-Touch → Bootloader im Modus *serial only* (kein Laufwerk) → App überträgt per Nordic-Legacy-Serial-DFU (wie `adafruit-nrfutil`), Variante s140v6 | ja (ungetestet) |
+| CircuitPython | 1200-Baud-Touch → UF2-Laufwerk | ja (ungetestet) |
+| **Auracaster 0.1.0/0.1.1**, ZMK, Demo-Firmware | kein Fernzugang → Doppel-Reset (RST↔GND zweimal) | **nein** |
+
+**Warum 0.1.0/0.1.1 nicht ohne Taste geht** (geprüft im Quelltext von Adafruit_nRF52_Bootloader 0.6.0 und Zephyr 4.4.2):
+Der Bootloader startet die UF2-Betriebsart nur, wenn (a) `NRF_POWER->GPREGRET` einen DFU-Magic-Wert enthält – den kann nur die
+laufende Firmware schreiben – oder (b) der Doppel-Reset-Marker im RAM steht **und** `RESETREAS` einen Reset über den **RST-Pin**
+meldet. Die Neustarts, die 0.1.x auslösen kann (Port schließen, Controller-Assert), sind Soft-Resets (`SYSRESETREQ`) und zählen
+nicht als Doppel-Reset; ein USB-Bus-Reset setzt den Chip gar nicht zurück. Zephyrs HCI-Vendor-Befehle (`0xFC01`…`0xFC12`) bieten
+weder Speicher- noch Register-Schreibzugriff. Deshalb einmalig von Hand – danach nie wieder.
+
+### Firmware-Kennung (für die App)
+
+* **Dongle** – HCI-Vendor-Befehl `0xFF50` (OGF 0x3F, OCF 0x350), Antwort *Command Complete*:
+  `status, "AURA", protocol(1), role(1=dongle, 2=repeater), variant(1=s140v6, 2=s140v7, 3=nosd), major, minor, patch, flags(bit0 Bootloader-Befehl, bit1 1200-Baud-Touch), load address (LE32)`.
+  Firmware ≤ 0.1.1 antwortet mit *Command Status „Unknown HCI Command“*. Der Engine-Helper fragt das nach dem Verbinden ab
+  (`firmware_*` im Status, *Dongle prüfen*).
+* **Repeater** – beim Öffnen der Konsole (DTR 0→1): `@AURA id role=repeater version=0.1.2 variant=s140v6 load=0x26000 flags=2 board=promicro_nrf52840`,
+  danach alle 2 s `@AURA status state=relaying source="…" rssi=-61 relay="… +" bis=2 rx_ok=… rx_lost=… tx_ok=… tx_drop=… tx_err=… uptime=…`.
+* Die Variante ergibt sich aus der Startadresse der laufenden Firmware (Vektortabelle), die Version aus `VERSION`.
+* Quelle: `common/auracaster_fw.c/.h` (von Dongle und Repeater gemeinsam genutzt).
+
+Jedes Release enthält zusätzlich `SHA256SUMS.txt` und `firmware-manifest.json` (Version, Variante, Startadresse, SHA-256 je Datei); die
+App prüft heruntergeladene und mitgelieferte Dateien damit. Die UF2-Dateien liegen außerdem in der App (`Contents/Resources/Firmware`)
+für die Offline-Installation.
+
+## Flashen ohne Programmer (von Hand)
 
 1. Artefakt **`auracaster-dongle-uf2`** aus dem letzten grünen Lauf von
    *Actions → Auracaster dongle firmware* laden und entpacken.
@@ -155,7 +191,8 @@ Das Manifest `west.yml` lädt nur Zephyr plus `hal_nordic`, `cmsis_6`, `mbedtls`
 | `prj.conf` | Controller-/ISO-/USB-Konfiguration |
 | `boards/promicro_nrf52840_nrf52840.conf` | nosd-Variante: UF2-Ausgabe bei Link-Adresse `0x1000` |
 | `sdv7.overlay` | Flash-Layout für S140 v7 (`0x27000`) |
-| `src/main.c` | H4-UART-Brücke aus Zephyrs `hci_uart` (unverändert, Apache‑2.0) |
+| `src/main.c` | H4-UART-Brücke aus Zephyrs `hci_uart` (Apache‑2.0) + Auracaster-Vendor-Befehle `0xFF50`/`0xFF51` |
+| `common/auracaster_fw.c/.h` | Firmware-Kennung, Neustart in den UF2-Bootloader, 1200-Baud-Touch (Dongle + Repeater) |
 | `src/status_led.c` | Status-LED auf P0.15 |
 | `scripts/uf2info.py` | prüft Startadresse/Family-ID einer UF2 |
 
@@ -178,3 +215,11 @@ Das Manifest `west.yml` lädt nur Zephyr plus `hal_nordic`, `cmsis_6`, `mbedtls`
 - Controller-Assert/Fatal-Error → **Warmstart** statt Endlosschleife (über USB-CDC kann bei gesperrten Interrupts kein HCI-Fehlerevent raus; der Dongle wirkte „bis zum Abstecken eingefroren“).
 - **Neustart beim Schließen des seriellen Ports** (DTR 1 → 0, 200 ms entprellt): jeder Helper-Start bekommt einen frischen Controller; der Helper nutzt das zur Selbstheilung (Port schließen → Dongle startet neu → erneut öffnen + `HCI_Reset`).
 - ISO-TX: 16 Puffer à 251 Byte (genug für 2 BIS × 120-Byte-SDUs mit 3–4 Paketen Vorlauf); H4 über USB-CDC braucht dafür nur ≈ 26 KB/s.
+
+## Änderungen in 0.1.2
+
+- **Bootloader ohne Reset-Taste:** HCI-Vendor-Befehl `0xFF51` und 1200-Baud-Touch (`GPREGRET = 0x57`, Soft-Reset) – Grundlage des Dongle-Assistenten der App.
+- **Firmware-Kennung** per HCI `0xFF50` (Version, Variante, Rolle, Fähigkeiten).
+- `CONFIG_BT_CTLR_ADV_RESERVE_MAX=n`: Extended/Periodic Advertising reserviert nur die Funkzeit der tatsächlichen Daten statt 191 Byte – mehr Luft für den BIG.
+  Hintergrund (Realtest 0.1.1): Bei 2 BIS × 120 Byte × RTN 4 bestätigte der Controller nur ~60 von 200 SDUs/s; die App sendet „Hohe Qualität“ jetzt mit RTN 2.
+- Sendeleistung weiterhin **+8 dBm** (`CONFIG_BT_CTLR_TX_PWR_PLUS_8`, jetzt auch explizit im Advertising-Set).
