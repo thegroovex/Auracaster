@@ -98,7 +98,7 @@ enum ScreenshotExporter {
 
             // Menu bar panel, onboarding and update sheet in their own windows.
             await showcase(
-                MenuBarPanel().environment(model).environment(updater),
+                MenuBarPanel(drawsWindowBackground: true).environment(model).environment(updater),
                 name: "menubar-\(suffix)", appearance: appearance, transparent: true,
                 directory: directory, note: note
             )

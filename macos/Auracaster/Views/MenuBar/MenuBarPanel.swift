@@ -1,9 +1,23 @@
 import AppKit
 import SwiftUI
 
-/// Control-Center-style menu bar window built from Liquid Glass modules:
-/// broadcast toggle, name, source picker, volume, latency, receivers, open window.
+/// Control-Center-style menu bar window: broadcast toggle, name, source picker,
+/// volume, preset + level, receivers, open window.
+///
+/// v0.1.3 layout fix (user screenshot of 0.1.2): the four-segment preset control
+/// was wider than the 320 pt window (cut off left/right) and its glass module
+/// rendered as an empty, distorted glass slab over the desktop. Now: fixed
+/// width, preset as a compact menu picker, every section the same opaque-ish
+/// card (no nested glass shapes over the window's own material), level meter
+/// only while sending, empty sections hidden.
 struct MenuBarPanel: View {
+    /// Fixed popover width (MenuBarExtra .window sizes to its content).
+    static let width: CGFloat = 320
+
+    /// Screenshot export: draw the window background the menu bar window
+    /// normally provides (the showcase window is borderless and transparent).
+    var drawsWindowBackground = false
+
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
     @Environment(UpdateController.self) private var updater
@@ -11,8 +25,7 @@ struct MenuBarPanel: View {
     var body: some View {
         @Bindable var model = model
 
-        GlassEffectContainer(spacing: 10) {
-            VStack(spacing: 10) {
+        VStack(spacing: 10) {
                 // Broadcast toggle module
                 HStack(spacing: 12) {
                     Button {
@@ -68,17 +81,32 @@ struct MenuBarPanel: View {
                 }
                 .module()
 
-                // Levels + preset
-                VStack(alignment: .leading, spacing: 8) {
-                    StereoLevelMeter(levels: model.levels, barHeight: 6)
-                    Picker("Preset", selection: $model.preset) {
-                        ForEach(BroadcastPreset.allCases) { preset in
-                            Text(preset.title).tag(preset)
+                // Preset (+ level while sending)
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 8) {
+                        Label("Preset", systemImage: "slider.horizontal.3")
+                            .labelStyle(.titleAndIcon)
+                            .lineLimit(1)
+                            .layoutPriority(1)
+                        Spacer(minLength: 4)
+                        Picker("Preset", selection: $model.preset) {
+                            ForEach(BroadcastPreset.allCases) { preset in
+                                Text(preset.title).tag(preset)
+                            }
                         }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .fixedSize()
+                        .disabled(model.isTransitioning)
                     }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .disabled(model.isTransitioning)
+                    Text(model.preset.codecSummary + " · ≈ \(model.preset.estimatedLatencyMilliseconds) ms")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    if model.isLive {
+                        StereoLevelMeter(levels: model.levels, barHeight: 6)
+                            .frame(height: 18)
+                    }
                 }
                 .module()
 
@@ -154,19 +182,28 @@ struct MenuBarPanel: View {
                     .fixedSize()
                 }
                 .controlSize(.large)
-            }
-            .padding(12)
         }
-        .frame(width: 320)
+        .padding(12)
+        .frame(width: Self.width)
+        .fixedSize(horizontal: false, vertical: true)
+        .background {
+            if drawsWindowBackground {
+                RoundedRectangle(cornerRadius: 22, style: .continuous).fill(.regularMaterial)
+            }
+        }
     }
 }
 
 private extension View {
-    /// One Control-Center module on system Liquid Glass.
+    /// One Control-Center module: the same card for every section (v0.1.3 –
+    /// no glass shapes, which rendered as empty distorted slabs in the popover).
     func module() -> some View {
         padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .glassEffect(.regular, in: .rect(cornerRadius: 18))
+            .background(Color.primary.opacity(0.05), in: .rect(cornerRadius: 18))
+            .overlay {
+                RoundedRectangle(cornerRadius: 18).strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+            }
     }
 }
 
