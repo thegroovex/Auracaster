@@ -133,7 +133,7 @@ jobs:
       - name: Screenshots (screenshot mode, light + dark)
         if: env.DO_PACKAGE == 'true'
         continue-on-error: true
-        timeout-minutes: 8
+        timeout-minutes: 11
         shell: bash
         run: |
           APP="$PWD/macos/build/Build/Products/Release/Auracaster.app"
@@ -142,7 +142,7 @@ jobs:
           "$APP/Contents/MacOS/Auracaster" -AuracasterExportScreenshots "$OUT" \
             -ApplePersistenceIgnoreState YES -NSQuitAlwaysKeepsWindows NO > "$OUT/app-stdout.txt" 2>&1 &
           PID=$!
-          end=$((SECONDS + 300))
+          end=$((SECONDS + 480))
           while kill -0 $PID 2>/dev/null && [ $SECONDS -lt $end ]; do
             for req in "$OUT"/request-*.txt; do
               [ -e "$req" ] || continue
@@ -196,7 +196,7 @@ jobs:
           brew install create-dmg >/dev/null 2>&1 || brew install create-dmg
           DMG="dist/Auracaster-macOS.dmg"   # stable name → releases/latest/download/Auracaster-macOS.dmg
           args=( --volname "Auracaster $V" --background /tmp/dmg-bg.tiff
-                 --window-pos 200 120 --window-size 680 528 --icon-size 96 --text-size 13
+                 --window-pos 200 120 --window-size 680 548 --icon-size 96 --text-size 13
                  --icon "Auracaster.app" 175 205 --hide-extension "Auracaster.app"
                  --app-drop-link 505 205
                  --icon "Zuerst lesen.html" 255 410 --icon "Gatekeeper-Fix.command" 425 410
@@ -291,6 +291,7 @@ jobs:
             echo "| auracaster-dongle-s140v6-0x26000.uf2 | Dongle-Firmware, **häufigster Fall** (INFO_UF2.TXT: \`SoftDevice: S140 version 6.x\`) |"
             echo "| auracaster-dongle-s140v7-0x27000.uf2 | Firmware für \`SoftDevice: S140 version 7.x\` |"
             echo "| auracaster-dongle-nosd-0x1000.uf2 | Firmware für \`SoftDevice: not found\` |"
+            echo "| auracaster-repeater-*.uf2 | *Optional:* eigenständiger Auracast-Repeater (nur USB-Strom), siehe firmware/repeater/README.md |"
             echo "| Auracaster-Dongle-Firmware-$V.zip | Alle Firmware-Dateien + BUILDINFO |"
             echo
             echo "### Ohne Gatekeeper-Warnung installieren (Terminal)"
