@@ -211,7 +211,11 @@ jobs:
             done
             sleep 0.2
           done
-          kill $PID 2>/dev/null || true
+          if kill -0 $PID 2>/dev/null; then echo "app still running (timeout)" >> "$OUT/export-log.txt"; kill $PID; else wait $PID; echo "app exit status $?" >> "$OUT/app-stdout.txt"; fi
+          sleep 3
+          # crash reports (screenshot mode must never crash – collect evidence if it does)
+          find ~/Library/Logs/DiagnosticReports /Library/Logs/DiagnosticReports -name 'Auracaster*' -newer "$OUT/app-stdout.txt" -exec cp {} "$OUT/" \; 2>/dev/null || true
+          find ~/Library/Logs/DiagnosticReports -name 'Auracaster*' -mmin -15 -exec cp {} "$OUT/" \; 2>/dev/null || true
           screencapture -x "$OUT/fullscreen.png" 2>>"$OUT/screencapture-errors.txt" || true
           rm -f "$OUT"/ack-* "$OUT"/request-*
           ls -l "$OUT"; cat "$OUT/export-log.txt" || true; cat "$OUT/screencapture-errors.txt" 2>/dev/null || true
