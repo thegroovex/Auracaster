@@ -170,3 +170,11 @@ Das Manifest `west.yml` lädt nur Zephyr plus `hal_nordic`, `cmsis_6`, `mbedtls`
   nichts an VCC hängt).
 * VID/PID `2fe3:0004` ist die generische Zephyr-CDC-ACM-Kennung; der Helper erkennt den
   Dongle primär am Produktnamen „Auracaster Dongle“.
+
+## Änderungen in 0.1.1
+
+- `CONFIG_BT_CTLR_ADV_DATA_BUF_MAX=4`: genug Advertising-Datenpuffer, wenn ein neuer Broadcast startet, bevor der alte vollständig abgebaut ist (v0.1.0: `MEMORY_CAPACITY_EXCEEDED` beim Preset-Wechsel, danach hing der Controller).
+- `CONFIG_BT_CTLR_ISOAL_SN_STRICT=n`: ein verspätetes ISO-Paket geht ins nächste BIS-Intervall, statt alle folgenden Pakete „in die Vergangenheit“ zu nummerieren (Dauer-Aussetzer nach einem einzigen USB-/Host-Hänger).
+- Controller-Assert/Fatal-Error → **Warmstart** statt Endlosschleife (über USB-CDC kann bei gesperrten Interrupts kein HCI-Fehlerevent raus; der Dongle wirkte „bis zum Abstecken eingefroren“).
+- **Neustart beim Schließen des seriellen Ports** (DTR 1 → 0, 200 ms entprellt): jeder Helper-Start bekommt einen frischen Controller; der Helper nutzt das zur Selbstheilung (Port schließen → Dongle startet neu → erneut öffnen + `HCI_Reset`).
+- ISO-TX: 16 Puffer à 251 Byte (genug für 2 BIS × 120-Byte-SDUs mit 3–4 Paketen Vorlauf); H4 über USB-CDC braucht dafür nur ≈ 26 KB/s.

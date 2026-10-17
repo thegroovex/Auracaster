@@ -298,6 +298,7 @@ jobs:
             echo
             echo "Mac-Audio als **Auracast™-Broadcast** an beliebig viele Hörgeräte, Kopfhörer und Lautsprecher."
             echo
+            if [ -f "docs/releases/v$V.md" ]; then cat "docs/releases/v$V.md"; echo; fi
             echo "### Download"
             echo "| Datei | Wofür |"
             echo "|---|---|"
@@ -316,7 +317,7 @@ jobs:
             echo
             echo "Die App ist ad-hoc signiert, nicht notarisiert. Beim ersten Start aus dem DMG: *Systemeinstellungen → Datenschutz & Sicherheit → Dennoch öffnen* (Details im README)."
             echo
-            echo "**Status:** frühe Version. Gesendet wird aktuell **ein** Stream (Stream 1); Streams 2/3 der Routing-Matrix sind in Arbeit. Hardware-Tests mit echten Empfängern laufen."
+            echo "**Status:** frühe Version. Gesendet wird aktuell **ein** Stream (Stream 1); Streams 2/3 der Routing-Matrix sind in Arbeit."
           } > notes.md
           cat notes.md
       - uses: softprops/action-gh-release@v2

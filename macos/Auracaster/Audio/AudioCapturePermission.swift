@@ -25,7 +25,7 @@ enum AudioCapturePermission {
 
     static let settingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture")!
 
-    private static let service = "kTCCServiceAudioCapture" as CFString
+    private static var service: CFString { "kTCCServiceAudioCapture" as CFString }
 
     private typealias PreflightFunction = @convention(c) (CFString, CFDictionary?) -> Int
     private typealias RequestFunction = @convention(c) (CFString, CFDictionary?, @escaping (Bool) -> Void) -> Void

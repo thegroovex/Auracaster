@@ -4,7 +4,7 @@ Auracaster sendet Audio vom Mac – das gesamte Systemaudio, einzelne Apps (z. B
 
 Ziele: niedrige Latenz (Preset *Ultra-Low* ≈ 18 ms), eine native Mac-Oberfläche für macOS 27 „Golden Gate“ und eine Menüleisten-Steuerung im Stil des Kontrollzentrums.
 
-> Status: **v0.1**. UI, Engine-Protokoll, Python-Helper, Updater, Assistent und Installer stehen; der Audio-Pfad ist bis zur FIFO verdrahtet, aber noch nicht mit echter Hardware getestet.
+> Status: **v0.1.1**. v0.1.0 sendete auf echter Hardware (Pro Micro nRF52840 → Galaxy S25 Ultra + Galaxy Buds: Ton hörbar, aber stotternd). v0.1.1 baut den Audio-Pfad controllergetaktet mit Jitter-Puffer neu auf – automatisch getestet, auf Hardware noch nicht gehört.
 
 ## Architektur
 
@@ -43,7 +43,7 @@ Ziele: niedrige Latenz (Preset *Ultra-Low* ≈ 18 ms), eine native Mac-Oberfläc
 | Engine | `Engine/BroadcastEngine.swift` | Protokoll `BroadcastEngine`, Events, Status-Typen |
 | Engine | `Engine/BumbleEngineClient.swift` | Startet `auracaster_helper.py` als Subprozess, JSON Lines über stdin/stdout, stderr → Log |
 | Engine | `Engine/HelperProtocol.swift` | Wire-Format (Befehle/Events, snake_case) |
-| Engine | `Engine/MockEngine.swift` | Simulation (Pegel, Scan) für Previews und UI-Arbeit ohne Dongle |
+| Engine | `Engine/MockEngine.swift` | Simulation (Pegel, Scan) für Previews, CI-Screenshots und ausdrückliche Wahl „Simulation“ |
 | Audio | `Audio/ProcessTapCapture.swift` | Core Audio Process Tap (systemweit/pro App) + Eingangsgeräte, IOProc |
 | Audio | `Audio/PCMTransport.swift` | FIFO-Transport (echt), Shared-Memory-Ringpuffer (Stub mit Layout) |
 | UI | `Views/…` | Studio, Routing-Matrix (Canvas), Quellen, Empfänger, Einstellungen, Menüleiste |
@@ -154,7 +154,8 @@ python3 -m venv .venv
 
 In der App unter **Einstellungen → Engine**:
 
-- Engine: *Bumble (USB-Dongle)* (Standard ist *Simulation*), danach App neu starten.
+- Engine: *Bumble (USB-Dongle)* – Standard, sobald `~/Library/Application Support/Auracaster/venv` existiert; Wechsel wirkt sofort (kein Neustart). *Simulation* nur auf ausdrücklichen Wunsch.
+- *Engine neu starten* übernimmt geänderte Pfade/Transport.
 - Python: Pfad zu `.venv/bin/python` (absolut) – oder leer lassen, dann nimmt die App das venv aus *Engine einrichten*.
 - Transport: `auto` (Standard: findet den Auracaster Dongle als `serial:/dev/cu.usbmodem…,resync`), alternativ explizit `serial:…` oder `usb:0`.
 - Hinweis: `/usr/bin/python3` von macOS ist zu alt (Bumble braucht ≥ 3.11) – unbedingt das venv angeben.
@@ -174,7 +175,7 @@ Fertige UF2-Dateien liegen in jedem Release; Quelle, Bootloader-Varianten und Se
 
 ### Berechtigungen
 
-- **Systemaudio-Aufnahme**: beim ersten Start eines Taps fragt macOS nach (`NSAudioCaptureUsageDescription`).
+- **Systemaudio-Aufnahme**: `AudioCapturePermission` fragt aktiv über TCC (`kTCCServiceAudioCapture`, zur Laufzeit geladen) – im Assistenten bzw. vor dem ersten Tap; Fallback ist der System-Dialog beim ersten Tap (`NSAudioCaptureUsageDescription`). Bei Ablehnung: Knopf zu *Datenschutz & Sicherheit → Bildschirm- & Systemaudioaufnahme*.
 - **Mikrofon**: für Eingangsgeräte (`NSMicrophoneUsageDescription`).
 - Die App ist derzeit **nicht sandboxed**, weil der Python-Helper libusb benutzt.
 
@@ -184,24 +185,27 @@ Fertige UF2-Dateien liegen in jedem Release; Quelle, Bootloader-Varianten und Se
 |---|---|
 | SwiftUI-Oberfläche (Studio, Routing, Quellen, Empfänger, Einstellungen, Menüleiste) | implementiert |
 | `MockEngine` | implementiert (Simulation) |
-| `BumbleEngineClient` (Subprozess, JSON Lines, Logs) | implementiert, noch ohne Hardware-Test |
-| Helper: Advertising, BIG, LC3, Pegel, Scan, Stop | implementiert; gegen Bumbles virtuellen Controller getestet (ohne ISO-Datenpfad) |
-| Process Tap (systemweit/App) + Eingangsgeräte | implementiert, Kompilierung/Laufzeit auf dem Mac noch zu prüfen |
+| `BumbleEngineClient` (Subprozess, JSON Lines, Logs, `fatal`/`stats`/`controller_info`) | implementiert, mit v0.1.0 auf Hardware gelaufen |
+| Helper: Advertising, BIG, LC3, Pegel, Scan, Stop | implementiert, auf Hardware gesendet (v0.1.0) |
+| Helper: controllergetaktete Sendeschleife, Jitter-Puffer, Drift-Korrektur, Encode-Thread, Statistik, WAV-Mitschnitt | neu in 0.1.1, `engine/tests/test_pipeline.py` (CI), auf Hardware noch nicht gehört |
+| Helper: sauberer Abbau + automatischer Controller-Reset | neu in 0.1.1 |
+| Process Tap systemweit | auf dem Mac getestet (v0.1.0) |
+| Process Tap App inkl. Hilfsprozesse (WebKit-GPU, „… Helper“) | neu in 0.1.1, ungetestet |
 | PCM über Named Pipe (Float32, Lautstärke) | implementiert |
 | Resampling (z. B. 44,1 → 48 kHz) | fehlt – nur 16/24/48 kHz werden akzeptiert |
 | Shared-Memory-Ringpuffer | Stub mit dokumentiertem Layout |
-| Empfängerliste | Platzhalter (benötigt Broadcast Assistant) |
+| Empfängerliste | leer mit Erklärung (Demo-Daten nur in der Simulation); Broadcast Assistant (BASS) folgt |
 | Routing-Matrix | UI echt; nur Stream 1 wird gesendet |
 | QR-Code (Broadcast Audio URI) | implementiert, mit Assistenten noch zu verifizieren |
 
 ## Roadmap
 
-1. **Hardware-Inbetriebnahme**: nRF52840 + Zephyr `hci_usb`, End-to-End-Test mit Hörgeräten/Earbuds, Latenz messen und Presets kalibrieren.
+1. **Hardware-Feinschliff**: 0.1.1-Audio-Pfad mit Earbuds/Hörgeräten verifizieren, Latenz messen und Presets kalibrieren.
 2. **Shared-Memory-Ringpuffer** statt FIFO (lock-free SPSC, `mmap` im Helper), Resampling via `AVAudioConverter`.
 3. **Virtuelles CoreAudio-Gerät** (AudioServerPlugIn, „Auracaster Output“) – beliebige Apps wählen Auracaster als Ausgabegerät.
 4. **AU/VST3-Plugin für Ableton Live** – Send-Effekt, der den Kanal direkt in den Broadcast speist.
 5. **Mehrere Streams**: mehrere BIGs bzw. BIG-Subgroups (z. B. Sprachen, Hörhilfe-Mono), Routing-Matrix voll funktionsfähig.
 6. **Verschlüsselung** (Broadcast Code) in UI + QR-Code, getestet mit Empfängern.
-7. **Scan / Receive / Assist**: Auracast in der Nähe empfangen, Broadcast-Assistant-Rolle (BASS) für echte Empfängerliste.
+7. **Broadcast Assistant (BASS)**: Kopfhörer vom Mac aus koppeln, Quelle hinzufügen/entfernen, Batterie und Lautstärke (VCP); Galaxy-Buds-BASS-Unterstützung ist unklar.
 8. **Kurzbefehle (Shortcuts/App Intents)**: Broadcast starten/stoppen, Quelle/Preset wechseln.
 9. Icon-Composer-Icon (mehrschichtig, hell/dunkel/getönt/klar), Sandboxing über XPC-Helper, Signierung/Notarisierung.

@@ -85,19 +85,20 @@ Stellschrauben von LE Audio direkt:
 
 | Stellschraube | Was sie tut | In Auracaster |
 |---|---|---|
-| **LC3-Framelänge** | Wie viel Audio pro Paket gesammelt wird | **7,5 ms** (*Ultra-Low*) oder 10 ms |
-| **Presentation Delay** | Puffer, nach dem alle Empfänger synchron abspielen | einstellbar pro Preset: 10 / 20 / 40 ms |
-| **RTN** (Retransmissions) | Wie oft jedes Paket wiederholt wird – mehr = robuster, aber mehr Funkzeit | 2 / 2 / 4 |
+| **LC3-Framelänge** | Wie viel Audio pro Paket gesammelt wird | 10 ms, experimentell 7,5 ms (*Ultra-Low β*) |
+| **Presentation Delay** | Puffer, nach dem alle Empfänger synchron abspielen | einstellbar pro Preset: 10 / 25 / 40 ms |
+| **RTN** (Retransmissions) | Wie oft jedes Paket wiederholt wird – mehr = robuster, aber mehr Funkzeit | 2 bzw. 4 |
 | **Max. Transport Latency** | Obergrenze für den Funkweg beim BIG-Aufbau | 10 / 20 / 65 ms |
 
-| Preset | Frame | Delay | Bitrate | Geschätzte Ende-zu-Ende-Latenz* |
-|---|---|---|---|---|
-| **Ultra-Low** | 7,5 ms | 10 ms | 80 kbit/s | **≈ 18 ms (Ziel)** |
-| **Ausgewogen** | 10 ms | 20 ms | 80 kbit/s | ≈ 30 ms (Ziel) |
-| **Hohe Qualität** | 10 ms | 40 ms | 96 kbit/s | ≈ 50 ms (Ziel) |
+| Preset | Format | Frame | Delay | Bitrate | Geschätzte Latenz* |
+|---|---|---|---|---|---|
+| **Kompatibel** | 24_2 (24 kHz) | 10 ms | 40 ms | 48 kbit/s | ≈ 50 ms – Pflichtformat, läuft auf jedem Auracast-Empfänger |
+| **Ausgewogen** | 48_2 | 10 ms | 25 ms | 80 kbit/s | ≈ 35 ms |
+| **Hohe Qualität** (Standard) | 48_4 | 10 ms | 40 ms | 96 kbit/s | ≈ 50 ms – mit Galaxy-Buds getestet |
+| **Ultra-Low β** | 48 kHz | 7,5 ms | 10 ms | 80 kbit/s | ≈ 18 ms – experimentell, nicht jeder Empfänger spielt 7,5 ms / 10 ms Delay ab |
 
-\* **Schätzung**, keine Messung: Framelänge + Presentation Delay. Aufnahme, Kodierung, USB und die Verarbeitung im Empfänger
-kommen hinzu – realistisch sind je nach Empfänger eher **25–60 ms**. Echte Messwerte folgen nach den Hardware-Tests.
+\* **Schätzung**, keine Messung: Framelänge + Presentation Delay. Dazu kommen ca. 30 ms Jitter-Puffer zwischen Mac-Aufnahme
+und Funk (seit 0.1.1, verhindert Aussetzer) sowie die Verarbeitung im Empfänger. Echte Messwerte folgen.
 Zum Vergleich: klassisches Bluetooth (A2DP) liegt meist bei 150–300 ms.
 
 ## Mehrere Streams
@@ -163,8 +164,8 @@ kostenloses Open-Source-Projekt ohne kostenpflichtige Apple-Notarisierung. Einma
 
 Danach begrüßt dich der **Willkommens-Assistent**:
 
-1. **Engine einrichten** klicken – lädt Python 3.12, Google Bumble und den LC3-Codec in `~/Library/Application Support/Auracaster` (ohne Xcode, ohne Homebrew, ca. 1–2 Minuten). Danach **Neu starten**.
-2. Beim ersten **Senden** fragt macOS nach **Systemaudio-Aufnahme** → **Erlauben**. Für Mikrofone/Audio-Interfaces kommt eine eigene Mikrofon-Abfrage.
+1. **Engine einrichten** klicken – lädt Python 3.12, Google Bumble und den LC3-Codec in `~/Library/Application Support/Auracaster` (ohne Xcode, ohne Homebrew, ca. 1–2 Minuten). Danach schaltet die App automatisch auf den Dongle um. Nach App-Updates richtet sie die Engine bei Bedarf selbst neu ein.
+2. **Systemaudio erlauben** klicken (oder beim ersten **Senden**): macOS fragt nach **Systemaudio-Aufnahme** → **Erlauben**. Für Mikrofone/Audio-Interfaces kommt eine eigene Mikrofon-Abfrage.
    Nachträglich änderbar unter *Systemeinstellungen → Datenschutz &amp; Sicherheit → Bildschirm- &amp; Systemaudioaufnahme* bzw. *Mikrofon*.
 
 Ohne Engine läuft Auracaster im **Simulationsmodus** – alles ist klickbar, aber es wird nicht gefunkt.
@@ -194,8 +195,8 @@ Sobald die App den Dongle benutzt, leuchtet die LED dauerhaft.
 
 ### 6. Ersten Stream starten
 
-1. Links eine **Quelle** wählen: *Systemaudio* (alles, was der Mac abspielt), eine **App** oder einen **Eingang** (Mikrofon/Interface).
-2. Im Studio optional den **Namen** ändern (so heißt der Sender auf den Empfängern) und ein **Preset** wählen.
+1. Die **Quelle** steht oben in der Toolbar – voreingestellt ist *Systemaudio* (alles, was der Mac abspielt). Alternativ eine **App** (auch Safari/Chrome; Apps, die gerade spielen, sind markiert) oder einen **Eingang** (Mikrofon/Interface).
+2. Im Studio optional den **Namen** ändern (so heißt der Sender auf den Empfängern) und ein **Preset** wählen – *Hohe Qualität* ist der empfohlene Standard.
 3. Oben rechts **Senden** klicken – der Knopf wird rot: **On Air**.
 
 ### 7. Empfänger verbinden
@@ -222,8 +223,15 @@ Das ist die Quarantäne-Markierung, nicht eine echte Beschädigung. Terminal öf
 
 <details><summary><b>Die App zeigt „Simulation“ statt des Dongles</b></summary>
 
-Die Engine ist noch nicht eingerichtet oder die App wurde danach nicht neu gestartet: *Einstellungen → Engine-Installation → Engine einrichten*, dann Auracaster beenden und neu öffnen.
-Unter *Einstellungen → Engine* muss *Bumble (USB-Dongle)* gewählt sein.
+Die Engine ist noch nicht eingerichtet: *Einstellungen → Engine-Installation → Engine einrichten* – danach schaltet die App von selbst um.
+Unter *Einstellungen → Engine* muss *Bumble (USB-Dongle)* gewählt sein (die Simulation gibt es nur noch auf ausdrücklichen Wunsch).
+</details>
+
+<details><summary><b>„Engine beendet (Exit-Code 1)“ oder „Engine-Installation unvollständig“</b></summary>
+
+Die Meldung zeigt jetzt die letzten Protokollzeilen. *Engine neu einrichten* (Knopf in der Meldung oder in den Einstellungen) behebt
+eine kaputte/alte Installation – v0.1.0 installierte Bumble unvollständig (`cannot import name 'crypto'`). Für Fehlerberichte:
+**Protokoll kopieren** und in ein GitHub-Issue einfügen.
 </details>
 
 <details><summary><b>„Kein Dongle gefunden“</b></summary>
@@ -232,6 +240,8 @@ Unter *Einstellungen → Engine* muss *Bumble (USB-Dongle)* gewählt sein.
 - Erscheint beim Einstecken ein Laufwerk *NICENANO*, ist der Dongle im Bootloader: Firmware draufziehen (Schritt 4).
 - Blinkt die LED gar nicht, die Firmware noch einmal flashen (evtl. die andere SoftDevice-Variante).
 - Im Terminal prüfen: `ls /dev/cu.usbmodem*` sollte einen Eintrag zeigen.
+- *Einstellungen → Diagnose → Dongle prüfen* zeigt, ob der Controller antwortet (Version, ISO-Broadcaster, gefundene Ports).
+- Ab Firmware 0.1.1 startet der Dongle neu, wenn die App die Verbindung schließt – die LED blinkt dann kurz, das ist normal.
 </details>
 
 <details><summary><b>Meine Kopfhörer finden den Sender nicht</b></summary>
@@ -240,10 +250,19 @@ Nicht jedes Bluetooth-Gerät kann Auracast – „Bluetooth 5.3“ allein reicht
 Bei Earbuds läuft die Suche oft über das gekoppelte Smartphone (Android 15+/One UI 6+). Abstand testweise auf 1–2 m verkürzen.
 </details>
 
-<details><summary><b>Der Ton hängt hinterher / knackt</b></summary>
+<details><summary><b>Kein Ton / Ton stottert oder klingt „roboterhaft“</b></summary>
 
-*Ultra-Low* ist auf Latenz getrimmt; bei Funkstörungen *Ausgewogen* oder *Hohe Qualität* wählen (mehr Puffer, mehr Wiederholungen).
-WLAN im 2,4-GHz-Band und viele Bluetooth-Geräte in der Nähe kosten Funkzeit.
+- **Firmware ab 0.1.1** flashen und **Hohe Qualität** wählen. Bleibt es stumm: *Kompatibel* (24 kHz, Pflichtformat aller Empfänger).
+- *Ultra-Low β* (7,5 ms) spielen nicht alle Empfänger ab – Samsung-Handys synchronisieren teils, bleiben aber stumm.
+- *Einstellungen → Diagnose*: „SDUs/s gesendet · bestätigt“ sollte bei Stereo/10 ms ≈ 200 · 200 sein; steigen *Unterläufe*, kommt zu wenig Audio vom Mac.
+- **WAV-Mitschnitt vor dem Encoder** einschalten, kurz senden, Datei im Logs-Ordner anhören: klingt sie sauber, liegt das Problem auf der Funkstrecke, sonst bei der Aufnahme.
+- WLAN im 2,4-GHz-Band und viele Bluetooth-Geräte in der Nähe kosten Funkzeit.
+</details>
+
+<details><summary><b>Safari/Chrome als Quelle: „spielt gerade kein Audio“</b></summary>
+
+Browser spielen Audio in Hilfsprozessen ab; Auracaster nimmt diese seit 0.1.1 mit auf. Die Meldung erscheint, wenn die App noch nie
+Audio ausgegeben hat – Wiedergabe starten und erneut senden, oder einfach *Systemaudio* nehmen.
 </details>
 
 <details><summary><b>macOS fragt nach einem Update erneut nach Berechtigungen</b></summary>
