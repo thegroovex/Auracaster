@@ -77,15 +77,15 @@ def dmg_background() -> str:
     w, h = 680, 480
     return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">{defs()}
   <rect width="{w}" height="{h}" fill="url(#soft)"/>
-  <circle cx="175" cy="205" r="150" fill="url(#glow)"/>
-  {rings(175, 205)}
+  <circle cx="175" cy="205" r="110" fill="url(#glow)"/>
+  {rings(175, 205, (66, 90, 112))}
   <text x="40" y="52" font-family="{FONT}" font-size="26" font-weight="800" fill="{DEEP}">Auracaster</text>
   <text x="40" y="76" font-family="{FONT}" font-size="14" fill="#5B5675">Mac-Audio als Auracast™ – an beliebig viele Hörgeräte &amp; Kopfhörer</text>
   <path d="M262,196 C320,150 380,150 438,196" fill="none" stroke="{VIOLET}" stroke-width="6" stroke-linecap="round" marker-end="url(#head)"/>
   <text x="350" y="138" text-anchor="middle" font-family="{FONT}" font-size="15" font-weight="700" fill="{VIOLET}">1 · in „Programme“ ziehen</text>
   <rect x="24" y="302" width="632" height="1" fill="{VIOLET}" fill-opacity=".18"/>
   <text x="340" y="330" text-anchor="middle" font-family="{FONT}" font-size="14" font-weight="700" fill="{DEEP}">2 · Erster Start? Hier steht alles – mit Bildern</text>
-  <text x="340" y="350" text-anchor="middle" font-family="{FONT}" font-size="12.5" fill="#5B5675">macOS blockiert? → Systemeinstellungen › Datenschutz &amp; Sicherheit › „Dennoch öffnen“ oder Gatekeeper-Fix</text>
+  <text x="340" y="350" text-anchor="middle" font-family="{FONT}" font-size="12.5" fill="#5B5675">macOS blockiert den Start? → „Dennoch öffnen“ in den Systemeinstellungen oder Gatekeeper-Fix</text>
 </svg>"""
 
 
@@ -160,7 +160,7 @@ def guide_gatekeeper() -> str:
   <text x="424" y="558" font-family="{FONT}" font-size="15.5" fill="#2B2A33">1  Systemeinstellungen → Datenschutz &amp; Sicherheit öffnen und nach unten scrollen</text>
   <text x="424" y="586" font-family="{FONT}" font-size="15.5" fill="#2B2A33">2  Bei „Auracaster wurde blockiert“ auf Dennoch öffnen klicken</text>
   <text x="424" y="614" font-family="{FONT}" font-size="15.5" fill="#2B2A33">3  Mit Passwort / Touch ID bestätigen, im Dialog nochmals Dennoch öffnen</text>
-  <text x="424" y="642" font-family="{FONT}" font-size="13.5" fill="#6E6C7A">Alternative: Gatekeeper-Fix.command im DMG oder Terminal: xattr -dr com.apple.quarantine /Applications/Auracaster.app</text>
+  <text x="424" y="642" font-family="{FONT}" font-size="13.5" fill="#6E6C7A">Alternativ: Gatekeeper-Fix.command im DMG doppelklicken – oder die Terminal-Zeile aus „Zuerst lesen“.</text>
 </svg>"""
 
 
@@ -190,7 +190,7 @@ def guide_flash() -> str:
         <path d="M200,200 C235,205 235,230 200,236" fill="none" stroke="#F472B6" stroke-width="4" stroke-linecap="round"/>
         <circle cx="95" cy="250" r="7" fill="#60A5FA"/>
       </g>
-      <text x="345" y="330" text-anchor="middle" font-family="{FONT}" font-size="34" font-weight="800" fill="#DB2777">2×</text>"""
+      <text x="375" y="335" text-anchor="middle" font-family="{FONT}" font-size="34" font-weight="800" fill="#DB2777">2×</text>"""
 
     drive = f"""
       <g transform="translate(110,110)">

@@ -114,7 +114,7 @@ jobs:
           }
           grep -E 'warning:' build.log | grep -v -E 'appintents|Metadata extraction' | sort -u | head -n 10 | while IFS= read -r line; do
             echo "::warning title=xcodebuild::${line#$GITHUB_WORKSPACE/}"
-          done
+          done || true
 
       - name: Sign ad-hoc (stable designated requirement)
         if: env.DO_PACKAGE == 'true'
