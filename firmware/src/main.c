@@ -30,6 +30,8 @@
 #include <zephyr/bluetooth/hci_raw.h>
 #include <zephyr/bluetooth/hci_vs.h>
 
+#include "auracaster_fw.h"
+
 #define LOG_MODULE_NAME hci_uart
 LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 
@@ -249,6 +251,57 @@ static void bt_uart_isr(const struct device *unused, void *user_data)
 	}
 }
 
+static int h4_send(struct net_buf *buf);
+
+/* Command Complete for a vendor command answered by this bridge itself */
+static void aura_cmd_complete(uint16_t opcode, const uint8_t *rp, uint8_t rp_len)
+{
+	struct net_buf *evt = bt_buf_get_rx(BT_BUF_EVT, K_FOREVER);
+
+	net_buf_add_u8(evt, BT_HCI_EVT_CMD_COMPLETE);
+	net_buf_add_u8(evt, 3U + rp_len);
+	net_buf_add_u8(evt, 1U); /* Num_HCI_Command_Packets */
+	net_buf_add_le16(evt, opcode);
+	net_buf_add_mem(evt, rp, rp_len);
+	(void)h4_send(evt);
+}
+
+/*
+ * Auracaster vendor commands (common/auracaster_fw.h), handled before the
+ * controller sees them. Returns true when the command was consumed.
+ */
+static bool aura_vendor_cmd(struct net_buf *buf)
+{
+	uint16_t opcode;
+
+	/* buf: H4 type, opcode (LE16), parameter length, parameters */
+	if (buf->len < 4U || buf->data[0] != H4_CMD) {
+		return false;
+	}
+	opcode = sys_get_le16(&buf->data[1]);
+
+	switch (opcode) {
+	case AURA_OP_READ_INFO: {
+		uint8_t rp[1 + AURA_FW_INFO_LEN];
+
+		rp[0] = BT_HCI_ERR_SUCCESS;
+		aura_fw_info(&rp[1]);
+		aura_cmd_complete(opcode, rp, sizeof(rp));
+		return true;
+	}
+	case AURA_OP_ENTER_BOOTLOADER: {
+		const uint8_t status = BT_HCI_ERR_SUCCESS;
+
+		aura_cmd_complete(opcode, &status, 1U);
+		/* give the event time to leave over USB, then restart */
+		k_msleep(150);
+		aura_fw_enter_uf2_bootloader();
+	}
+	default:
+		return false;
+	}
+}
+
 static void tx_thread(void *p1, void *p2, void *p3)
 {
 	while (1) {
@@ -257,6 +310,10 @@ static void tx_thread(void *p1, void *p2, void *p3)
 
 		/* Wait until a buffer is available */
 		buf = k_fifo_get(&tx_queue, K_FOREVER);
+		if (aura_vendor_cmd(buf)) {
+			net_buf_unref(buf);
+			continue;
+		}
 		/* Pass buffer to the stack */
 		err = bt_send(buf);
 		if (err) {

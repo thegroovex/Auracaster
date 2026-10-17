@@ -20,6 +20,7 @@
  */
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
@@ -1222,6 +1223,48 @@ static void stats_log(void)
 		(long)atomic_get(&st_tx_ok), (long)atomic_get(&st_tx_drop),
 		(long)atomic_get(&st_tx_err), (long)atomic_get(&inflight[0]),
 		(long)(MAX_BIS > 1 ? atomic_get(&inflight[MAX_BIS - 1]) : 0));
+}
+
+/* Machine-readable status for the Mac app (host_link.c, "@AURA status ...") */
+void repeater_status_format(char *out, size_t len)
+{
+	static const char *const names[] = {
+		[LED_SEARCHING] = "searching",
+		[LED_SYNCED] = "synced",
+		[LED_RELAYING] = "relaying",
+		[LED_ERROR] = "error",
+	};
+	enum led_state state = led_get();
+	char src[NAME_MAX_LEN + 1];
+	char relay[NAME_MAX_LEN + 1];
+
+	/* benign race: a name being replaced is only shown for 2 s */
+	memcpy(src, source.name, sizeof(src));
+	src[NAME_MAX_LEN] = '\0';
+	for (char *c = src; *c != '\0'; c++) {
+		if (*c == '"') {
+			*c = '\'';
+		}
+	}
+	relay[0] = '\0';
+	if (relay_active) {
+		relay_name(relay);
+		for (char *c = relay; *c != '\0'; c++) {
+			if (*c == '"') {
+				*c = '\'';
+			}
+		}
+	}
+
+	snprintf(out, len,
+		 "state=%s source=\"%s\" rssi=%d relay=\"%s\" bis=%u rx_ok=%ld rx_lost=%ld "
+		 "tx_ok=%ld tx_drop=%ld tx_err=%ld uptime=%ld",
+		 (unsigned int)state < ARRAY_SIZE(names) ? names[state] : "?",
+		 state == LED_SEARCHING ? "" : src, (int)source.rssi, relay,
+		 (unsigned int)rx_sig.num_bis, (long)atomic_get(&st_rx_ok),
+		 (long)atomic_get(&st_rx_bad), (long)atomic_get(&st_tx_ok),
+		 (long)atomic_get(&st_tx_drop), (long)atomic_get(&st_tx_err),
+		 (long)(k_uptime_get() / 1000));
 }
 
 /* ------------------------------------------------------------------------- */

@@ -10,5 +10,6 @@ enum led_state {
 };
 
 void led_set(enum led_state state);
+enum led_state led_get(void);
 
 #endif /* REPEATER_LED_H_ */

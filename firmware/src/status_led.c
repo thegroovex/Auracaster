@@ -13,6 +13,10 @@
  * commands: the helper closes the port, the dongle reboots, the helper
  * re-opens it and resynchronises with HCI_Reset.
  *
+ * v0.1.2: "1200 baud touch" - if the host set 1200 baud before dropping DTR,
+ * the dongle restarts into the UF2 bootloader instead (Mac app firmware
+ * update, like Arduino/CircuitPython boards).
+ *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -21,6 +25,8 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/sys/reboot.h>
+
+#include "auracaster_fw.h"
 
 static const struct device *const hci_uart = DEVICE_DT_GET(DT_CHOSEN(zephyr_bt_c2h_uart));
 
@@ -48,14 +54,13 @@ static void status_led_thread(void *p1, void *p2, void *p3)
 	while (true) {
 		uint32_t dtr = 0U;
 
-		if (device_is_ready(hci_uart)) {
-			(void)uart_line_ctrl_get(hci_uart, UART_LINE_CTRL_DTR, &dtr);
-		}
+		/* enters the UF2 bootloader on a 1200 baud touch (no return) */
+		dtr = aura_fw_touch_poll(hci_uart);
 
 		if (last_dtr && !dtr) {
 			/* Host closed the port: confirm for 200 ms, then reboot. */
 			k_msleep(200);
-			(void)uart_line_ctrl_get(hci_uart, UART_LINE_CTRL_DTR, &dtr);
+			dtr = aura_fw_touch_poll(hci_uart);
 			if (!dtr) {
 				sys_reboot(SYS_REBOOT_WARM);
 			}

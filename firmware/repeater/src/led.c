@@ -17,6 +17,11 @@
 
 static atomic_t led_state_val = ATOMIC_INIT(LED_SEARCHING);
 
+enum led_state led_get(void)
+{
+	return (enum led_state)atomic_get(&led_state_val);
+}
+
 void led_set(enum led_state state)
 {
 	atomic_set(&led_state_val, (atomic_val_t)state);

@@ -25,7 +25,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: auracaster-firmware-${{ github.ref }}
+  # github.workflow is the caller's name when used via workflow_call, so the
+  # standalone run and the one inside "Auracaster macOS app" never cancel each other
+  group: auracaster-firmware-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -162,6 +164,9 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: firmware
       - uses: actions/download-artifact@v4
         with:
           pattern: uf2-*
@@ -185,6 +190,28 @@ jobs:
             cat info-*.txt
           } > BUILDINFO.txt
           rm info-*.txt
+          # checksums + manifest: the Mac app verifies downloads/bundled files with them
+          sha256sum *.uf2 > SHA256SUMS.txt
+          python3 - <<'PY'
+          import hashlib, json, pathlib, re
+          def version(path):
+              v = dict(re.findall(r'^(\w+)\s*=\s*(\S*)', pathlib.Path(path).read_text(), re.M))
+              return f"{v['VERSION_MAJOR']}.{v['VERSION_MINOR']}.{v['PATCHLEVEL']}"
+          versions = {'dongle': version('../firmware/VERSION'), 'repeater': version('../firmware/repeater/VERSION')}
+          files = []
+          for uf2 in sorted(pathlib.Path('.').glob('auracaster-*.uf2')):
+              m = re.match(r'auracaster-(dongle|repeater)-(s140v6|s140v7|nosd)-(0x[0-9a-f]+)\.uf2$', uf2.name)
+              if not m:
+                  continue
+              role, variant, start = m.groups()
+              files.append({'name': uf2.name, 'role': role, 'variant': variant, 'start': start,
+                            'version': versions[role], 'size': uf2.stat().st_size,
+                            'sha256': hashlib.sha256(uf2.read_bytes()).hexdigest()})
+          assert len(files) == 6, files
+          manifest = {'schema': 1, 'commit': '${{ github.sha }}', 'versions': versions, 'files': files}
+          pathlib.Path('firmware-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          print(json.dumps(manifest, indent=2))
+          PY
           cat BUILDINFO.txt; ls -l
       - uses: actions/upload-artifact@v4
         with:
