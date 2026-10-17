@@ -44,6 +44,7 @@ LOG_MODULE_REGISTER(repeater, LOG_LEVEL_INF);
 
 #define MAX_BIS           CONFIG_AURACAST_REPEATER_MAX_BIS
 #define MAX_INFLIGHT      CONFIG_AURACAST_REPEATER_MAX_INFLIGHT
+#define MAX_BURST         7 /* BN max: SDUs per source BIG event */
 #define AD_BUF_LEN        CONFIG_BT_CTLR_ADV_DATA_LEN_MAX
 #define SCAN_AD_LEN       255
 #define NAME_MAX_LEN      32 /* Broadcast Name: 4..32 octets */
@@ -150,6 +151,10 @@ static size_t pa_raw_len;
 /* Hot path state */
 static atomic_t forwarding;
 static atomic_t inflight[MAX_BIS];
+/* Source BIG with BN > 1 (ISO interval = n x SDU interval) delivers n SDUs
+ * per BIS at once; they leave in n consecutive relay events.
+ */
+static atomic_t inflight_limit = ATOMIC_INIT(MAX_INFLIGHT);
 static atomic_t last_rx_ms;
 
 static atomic_t st_rx_ok;
@@ -158,7 +163,7 @@ static atomic_t st_tx_ok;
 static atomic_t st_tx_drop;
 static atomic_t st_tx_err;
 
-NET_BUF_POOL_FIXED_DEFINE(tx_pool, MAX_BIS * (MAX_INFLIGHT + 1),
+NET_BUF_POOL_FIXED_DEFINE(tx_pool, MAX_BIS * (MAX_BURST + MAX_INFLIGHT),
 			  BT_ISO_SDU_BUF_SIZE(CONFIG_BT_ISO_TX_MTU),
 			  CONFIG_BT_CONN_TX_USER_DATA_SIZE, NULL);
 
@@ -798,7 +803,7 @@ static void rx_recv(struct bt_iso_chan *chan, const struct bt_iso_recv_info *inf
 	}
 
 	/* Bounded queue: the two BIGs run on different clocks. */
-	if (atomic_get(&inflight[idx]) >= MAX_INFLIGHT) {
+	if (atomic_get(&inflight[idx]) >= atomic_get(&inflight_limit)) {
 		atomic_inc(&st_tx_drop);
 		return;
 	}
@@ -982,6 +987,20 @@ static int source_sync(void)
 	rx_sig.max_sdu = bi.max_sdu;
 	rx_sig.framing = bi.framing;
 	rx_sig.encryption = bi.encryption;
+
+	uint32_t burst = 1U;
+
+	if (bi.sdu_interval > 0U) {
+		burst = ((uint32_t)bi.iso_interval * 1250U + bi.sdu_interval / 2U) /
+			bi.sdu_interval;
+	}
+	burst = CLAMP(burst, 1U, (uint32_t)MAX_BURST);
+	atomic_set(&inflight_limit, (atomic_val_t)(burst + MAX_INFLIGHT - 1U));
+	if (burst > 1U) {
+		LOG_WRN("source sends %u SDUs per BIG event (ISO interval %u us) - "
+			"long source events leave little airtime for the relay",
+			burst, bi.iso_interval * 1250U);
+	}
 
 	if (bi.num_bis > MAX_BIS) {
 		LOG_WRN("source has %u BIS, relaying the first %u only", bi.num_bis, MAX_BIS);
