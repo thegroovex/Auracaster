@@ -20,6 +20,7 @@
 #include <zephyr/device.h>
 #include <zephyr/init.h>
 #include <zephyr/drivers/uart.h>
+#include <zephyr/sys/reboot.h>
 
 #include <zephyr/net_buf.h>
 #include <zephyr/bluetooth/bluetooth.h>
@@ -321,9 +322,11 @@ void bt_ctlr_assert_handle(char *file, uint32_t line)
 	/* Flush the logs before locking the CPU */
 	LOG_PANIC();
 
-	while (true) {
-		k_cpu_idle();
-	};
+	/* Reboot instead of halting: the host re-opens the port and resyncs
+	 * with HCI_Reset. A halted dongle looked "hung until replug".
+	 */
+	k_busy_wait(20000);
+	sys_reboot(SYS_REBOOT_WARM);
 
 	CODE_UNREACHABLE;
 }
@@ -369,9 +372,11 @@ void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
 	/* Flush the logs before locking the CPU */
 	LOG_PANIC();
 
-	while (true) {
-		k_cpu_idle();
-	};
+	/* Reboot instead of halting: the host re-opens the port and resyncs
+	 * with HCI_Reset. A halted dongle looked "hung until replug".
+	 */
+	k_busy_wait(20000);
+	sys_reboot(SYS_REBOOT_WARM);
 
 	CODE_UNREACHABLE;
 }

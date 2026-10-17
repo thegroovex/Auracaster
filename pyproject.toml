@@ -26,6 +26,7 @@ dependencies = [
     "platformdirs >= 3.10.0; platform_system!='Emscripten'",
     "prompt_toolkit >= 3.0.16; platform_system!='Emscripten'",
     "pyee >= 13.0.0",
+    "typing_extensions >= 4.12",
     "tomli ~= 2.2.1; platform_system!='Emscripten' and python_version<'3.11'",
     "websockets >= 15.0.1; platform_system!='Emscripten'",
     # Serial
@@ -111,13 +112,26 @@ bumble-intel-fw-download = "bumble.tools.intel_fw_download:main"
 Homepage = "https://github.com/google/bumble"
 
 [tool.setuptools]
+# Complete package list (Auracaster v0.1.1: bumble.crypto, bumble.audio, bumble.vendor.*
+# etc. were missing, so `pip install` produced an engine that crashed on import).
+# CI (auracaster-macos.yml, job "engine") installs the wheel into a fresh venv and
+# imports every subpackage, so a new package without an entry here fails the build.
 packages = [
     "bumble",
-    "bumble.transport",
-    "bumble.transport.grpc_protobuf",
+    "bumble.audio",
+    "bumble.crypto",
     "bumble.drivers",
     "bumble.profiles",
+    "bumble.testing",
+    "bumble.transport",
+    "bumble.transport.grpc_protobuf",
+    "bumble.transport.grpc_protobuf.netsim",
+    "bumble.transport.grpc_protobuf.rootcanal",
+    "bumble.vendor",
+    "bumble.vendor.android",
+    "bumble.vendor.zephyr",
     "bumble.apps",
+    "bumble.apps.speaker",
     "bumble.tools",
 ]
 
@@ -131,6 +145,7 @@ write_to = "bumble/_version.py"
 
 [tool.setuptools.package-data]
 "*" = ["*.pyi", "py.typed"]
+"bumble.apps.speaker" = ["*.html", "*.css", "*.js", "*.svg"]
 
 [tool.pytest.ini_options]
 pythonpath = "."

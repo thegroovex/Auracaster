@@ -7,9 +7,11 @@
 # Terminal-Installer und von Hand benutzt:
 #
 #   bash setup-engine.sh            # Ref = main
-#   AURACASTER_ENGINE_REF=v0.1.0 bash setup-engine.sh
+#   AURACASTER_ENGINE_REF=v0.1.1 bash setup-engine.sh
 #
 # Am Ende steht eine Zeile "AURACASTER_PYTHON=<pfad>", die die App ausliest.
+# "$BASE/engine-version" enthält danach den installierten Ref; die App richtet die
+# Engine automatisch neu ein, wenn er nicht zur App-Version passt (Update).
 set -euo pipefail
 
 REPO="thegroovex/Auracaster"
@@ -53,21 +55,43 @@ if ! curl -fsIL "$URL" >/dev/null 2>&1; then
 fi
 step "Installiere Bumble + LC3 aus $URL"
 # Ohne .git kennt setuptools_scm keine Version – feste Version vorgeben.
+# --reinstall-package: the version string is always the same, so without it an
+# update would keep the old (v0.1.0: incomplete) bumble package in the venv.
 SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+auracaster" \
-  "$UV" pip install --quiet --python "$VENV/bin/python" "bumble[auracast] @ $URL"
+  "$UV" pip install --quiet --reinstall-package bumble --python "$VENV/bin/python" "bumble[auracast] @ $URL"
 ok "Pakete installiert"
 
-# 4. Selbsttest
+# 4. Selbsttest: jedes Bumble-Unterpaket + LC3 muss importierbar sein
 step "Selbsttest"
 "$VENV/bin/python" - <<'PY'
-import bumble, importlib.util
-print("  ✓ bumble", getattr(bumble, "__version__", "?"))
-if importlib.util.find_spec("lc3") is None:
-    print("  ⚠ lc3 (LC3-Encoder) fehlt – Senden ist so nicht möglich")
-else:
+import importlib, pathlib, pkgutil, sys
+import bumble
+failures = []
+base = pathlib.Path(bumble.__file__).parent
+for info in pkgutil.walk_packages([str(base)], "bumble."):
+    if info.ispkg:
+        try:
+            importlib.import_module(info.name)
+        except ImportError as error:
+            if "grpc" not in str(error) and "protobuf" not in str(error):
+                failures.append(f"{info.name}: {error}")
+for name in ("bumble.device", "bumble.crypto", "bumble.profiles.bap", "bumble.audio.io"):
+    try:
+        importlib.import_module(name)
+    except ImportError as error:
+        failures.append(f"{name}: {error}")
+print("  ✓ bumble", getattr(bumble, "__version__", "?"), "aus", base)
+try:
     import lc3  # noqa: F401
     print("  ✓ lc3 (LC3-Encoder)")
+except ImportError:
+    failures.append("lc3 (LC3-Encoder) fehlt – Senden ist so nicht möglich")
+for line in failures:
+    print("  ✗", line)
+sys.exit(1 if failures else 0)
 PY
+echo "$REF" > "$BASE/engine-version"
+ok "Engine-Version $REF"
 
 printf '\n✅ Fertig. Die Engine liegt in %s\n' "$VENV"
 echo "AURACASTER_PYTHON=$VENV/bin/python"
