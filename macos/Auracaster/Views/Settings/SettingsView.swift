@@ -3,6 +3,8 @@ import SwiftUI
 /// Engine, dongle and broadcast settings (sidebar item and Settings scene).
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
+    @Environment(UpdateController.self) private var updater
+    @AppStorage(SettingsKeys.automaticUpdateChecks) private var automaticUpdateChecks = true
 
     @AppStorage(SettingsKeys.engineKind) private var engineKind: EngineKind = .mock
     @AppStorage(SettingsKeys.transport) private var transport = "auto"
@@ -38,6 +40,38 @@ struct SettingsView: View {
                     .help("Bis 16 Zeichen. Verschlüsselung ist im Helper vorbereitet, aber noch nicht mit Empfängern getestet.")
                 TextField("Sprache (ISO 639-3)", text: $language, prompt: Text("deu"))
                 Toggle("Öffentlicher Broadcast (Public Broadcast Announcement)", isOn: $isPublic)
+            }
+
+            Section("Engine-Installation") {
+                LabeledContent("Python-Umgebung") {
+                    Text(EngineSetup.isInstalled ? "eingerichtet" : "fehlt")
+                        .foregroundStyle(EngineSetup.isInstalled ? .green : .orange)
+                }
+                Button(EngineSetup.isInstalled ? "Engine neu einrichten / aktualisieren" : "Engine einrichten") {
+                    EngineSetup.shared.run()
+                }
+                .disabled(EngineSetup.shared.phase == .running)
+                if EngineSetup.shared.phase == .running, let last = EngineSetup.shared.log.last {
+                    Text(last).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1)
+                }
+                if case .failed(let message) = EngineSetup.shared.phase {
+                    Text(message).font(.caption).foregroundStyle(.orange)
+                }
+            }
+
+            Section("Updates") {
+                Toggle("Automatisch täglich nach Updates suchen", isOn: $automaticUpdateChecks)
+                LabeledContent("Installierte Version", value: updater.currentVersion.description)
+                if let lastCheck = updater.lastCheck {
+                    LabeledContent("Zuletzt geprüft", value: lastCheck.formatted(date: .abbreviated, time: .shortened))
+                }
+                HStack {
+                    Button("Jetzt nach Updates suchen …") { updater.checkForUpdates() }
+                    if updater.isUpdateAvailable {
+                        Label("\(updater.latestRelease?.tagName ?? "") verfügbar", systemImage: "arrow.down.circle.fill")
+                            .foregroundStyle(Color.accentColor)
+                    }
+                }
             }
 
             Section("Darstellung") {

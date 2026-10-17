@@ -16,6 +16,10 @@ struct MainToolbar: ToolbarContent {
         }
 
         ToolbarItem(placement: .primaryAction) {
+            UpdateBadgeButton()
+        }
+
+        ToolbarItem(placement: .primaryAction) {
             OnAirButton()
         }
     }

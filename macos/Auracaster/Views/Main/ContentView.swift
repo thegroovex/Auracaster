@@ -59,8 +59,13 @@ struct ContentView: View {
     @Environment(AppModel.self) private var model
     @State private var selection: SidebarItem? = .broadcasts
     @State private var columnVisibility = NavigationSplitViewVisibility.all
+    @Environment(UpdateController.self) private var updater
+    @AppStorage(SettingsKeys.hasCompletedOnboarding) private var hasCompletedOnboarding = false
+    @State private var showOnboarding = false
 
     var body: some View {
+        @Bindable var updater = updater
+
         NavigationSplitView(columnVisibility: $columnVisibility) {
             SidebarView(selection: $selection)
                 .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 280)
@@ -71,6 +76,24 @@ struct ContentView: View {
         .navigationTitle(model.broadcastName)
         .navigationSubtitle(model.isLive ? "Auf Sendung" : "Bereit")
         .toolbar { MainToolbar(model: model) }
+        .sheet(isPresented: $showOnboarding) {
+            OnboardingView()
+                .environment(model)
+                .environment(updater)
+        }
+        .sheet(isPresented: $updater.isSheetPresented) {
+            UpdateSheet()
+                .environment(updater)
+        }
+        .onAppear {
+            if !hasCompletedOnboarding && !ScreenshotMode.isActive { showOnboarding = true }
+        }
+        .onChange(of: hasCompletedOnboarding) { _, completed in
+            if !completed { showOnboarding = true }
+        }
+        .onChange(of: ScreenshotDirector.shared.sidebarItem) { _, item in
+            if let item { selection = item }
+        }
         .alert(
             "Auracaster",
             isPresented: Binding(
@@ -105,5 +128,6 @@ struct ContentView: View {
 #Preview {
     ContentView()
         .environment(AppModel.preview())
+        .environment(UpdateController.shared)
         .frame(width: 1100, height: 700)
 }

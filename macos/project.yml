@@ -23,6 +23,9 @@ targets:
       # Python engine helper, copied into Contents/Resources of the app bundle.
       - path: ../engine/auracaster_helper.py
         buildPhase: resources
+      # One-click engine setup (uv → Python 3.12 venv → Bumble + LC3), run by the app.
+      - path: ../engine/setup-engine.sh
+        buildPhase: resources
     settings:
       base:
         PRODUCT_NAME: Auracaster

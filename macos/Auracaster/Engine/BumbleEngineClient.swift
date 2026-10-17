@@ -23,7 +23,12 @@ actor BumbleEngineClient: BroadcastEngine {
 
         static var `default`: Configuration {
             let defaults = UserDefaults.standard
-            let python = defaults.string(forKey: SettingsKeys.pythonPath) ?? "/usr/bin/python3"
+            // Prefer the environment created by setup-engine.sh unless the user chose another one.
+            var python = defaults.string(forKey: SettingsKeys.pythonPath) ?? ""
+            if python.isEmpty || python == "/usr/bin/python3", EngineSetup.isInstalled {
+                python = EngineSetup.defaultPython.path
+            }
+            if python.isEmpty { python = "/usr/bin/python3" }
             let helper = defaults.string(forKey: SettingsKeys.helperOverridePath).flatMap {
                 $0.isEmpty ? nil : URL(fileURLWithPath: $0)
             }

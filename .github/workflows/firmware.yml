@@ -18,6 +18,7 @@ on:
       - '.github/workflows/firmware.yml'
       - '!**/*.md'           # docs-only changes skip the build
   workflow_dispatch:
+  workflow_call:          # used by the Auracaster macOS release job (tags v*)
 
 permissions:
   contents: read

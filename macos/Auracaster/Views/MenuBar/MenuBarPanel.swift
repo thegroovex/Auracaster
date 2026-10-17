@@ -6,6 +6,7 @@ import SwiftUI
 struct MenuBarPanel: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
+    @Environment(UpdateController.self) private var updater
 
     var body: some View {
         @Bindable var model = model
@@ -101,14 +102,55 @@ struct MenuBarPanel: View {
                 }
                 .module()
 
-                Button {
-                    openWindow(id: WindowID.main)
-                    NSApplication.shared.activate()
-                } label: {
-                    Label("Fenster öffnen", systemImage: "macwindow")
-                        .frame(maxWidth: .infinity)
+                if updater.isUpdateAvailable {
+                    Button {
+                        openWindow(id: WindowID.main)
+                        NSApplication.shared.activate()
+                        updater.isSheetPresented = true
+                    } label: {
+                        HStack {
+                            Image(systemName: "arrow.down.circle.fill")
+                                .foregroundStyle(Color.accentColor)
+                            Text("Update auf \(updater.latestRelease?.tagName ?? "") verfügbar")
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .module()
                 }
-                .buttonStyle(.glass)
+
+                HStack(spacing: 10) {
+                    Button {
+                        openWindow(id: WindowID.main)
+                        NSApplication.shared.activate()
+                    } label: {
+                        Label("Fenster öffnen", systemImage: "macwindow")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.glass)
+
+                    Menu {
+                        Button("Nach Updates suchen …") {
+                            openWindow(id: WindowID.main)
+                            NSApplication.shared.activate()
+                            updater.checkForUpdates()
+                        }
+                        Button("Einrichtungsassistent …") {
+                            openWindow(id: WindowID.main)
+                            NSApplication.shared.activate()
+                            UserDefaults.standard.set(false, forKey: SettingsKeys.hasCompletedOnboarding)
+                        }
+                        Divider()
+                        Button("Auracaster beenden") { NSApplication.shared.terminate(nil) }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                    }
+                    .menuIndicator(.hidden)
+                    .buttonStyle(.glass)
+                    .fixedSize()
+                }
                 .controlSize(.large)
             }
             .padding(12)
@@ -129,4 +171,5 @@ private extension View {
 #Preview {
     MenuBarPanel()
         .environment(AppModel.preview(live: true))
+        .environment(UpdateController.shared)
 }

@@ -1,12 +1,14 @@
 name: Auracaster macOS app
 
-# Builds the SwiftUI app under macos/ (XcodeGen, Swift 6, macOS 26 SDK) and uploads an
-# ad-hoc signed Auracaster.app as ZIP artifact. Only runs when the app or this workflow
-# changes, or when started by hand - macOS minutes count 10x on private repositories.
+# Builds the SwiftUI app under macos/ (XcodeGen, Swift 6, macOS 26 SDK), renders documentation
+# screenshots from the real app (screenshot mode, mock engine), and packages an ad-hoc signed
+# ZIP + illustrated DMG. Publishing a GitHub Release happens ONLY for tags v* (CI best practice:
+# release jobs behind tag/label) – together with freshly built dongle firmware (firmware.yml).
 
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]           # path filters are not evaluated for tag pushes
     paths:
       - 'macos/**'
       - 'engine/**'
@@ -28,6 +30,11 @@ concurrency:
   group: auracaster-macos-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') }}
+  # package (sign, screenshots, ZIP, DMG) on main/tags/dispatch and on PRs labelled "release"
+  DO_PACKAGE: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'release') }}
+
 jobs:
   engine:
     name: Python helper - syntax + import check
@@ -38,26 +45,35 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - run: python -m py_compile engine/auracaster_helper.py
+      - run: |
+          python -m py_compile engine/auracaster_helper.py
+          bash -n engine/setup-engine.sh macos/Installer/install.sh macos/Installer/Gatekeeper-Fix.command
 
   build:
     name: Build Auracaster.app (Xcode 26+)
     runs-on: macos-26
-    timeout-minutes: 45
+    timeout-minutes: 50
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v5
+
+      - name: Version
+        id: version
+        shell: bash
+        run: |
+          if [ "$IS_RELEASE" = true ]; then V="${GITHUB_REF_NAME#v}"; else
+            V=$(grep -E '^\s+MARKETING_VERSION:' macos/project.yml | head -1 | sed -E 's/.*"(.*)".*/\1/'); fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Version $V (build ${{ github.run_number }})"
 
       - name: Select newest Xcode
         shell: bash
         run: |
-          ls -d /Applications/Xcode*.app || true
           XC=$(ls -d /Applications/Xcode_*.app 2>/dev/null | grep -v -i beta | sort -V | tail -n 1)
           [ -z "$XC" ] && XC=$(ls -d /Applications/Xcode_*.app | sort -V | tail -n 1)
-          echo "Using $XC"
           sudo xcode-select -s "$XC/Contents/Developer"
-          xcodebuild -version
-          echo "::notice title=Xcode::$(xcodebuild -version | tr '\n' ' ') / $(xcrun --show-sdk-version --sdk macosx 2>/dev/null)"
-          sw_vers
+          echo "::notice title=Xcode::$(xcodebuild -version | tr '\n' ' ') / $(xcrun --show-sdk-version --sdk macosx 2>/dev/null) / $(sw_vers -productVersion)"
 
       - name: Cache XcodeGen + DerivedData
         uses: actions/cache@v4
@@ -89,33 +105,141 @@ jobs:
           cd macos
           xcodebuild -project Auracaster.xcodeproj -scheme Auracaster -configuration Release \
             -destination 'platform=macOS' -derivedDataPath build \
+            MARKETING_VERSION="${{ steps.version.outputs.version }}" CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
             CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO build 2>&1 | tee build.log || {
-            # surface compiler errors as annotations so they can be read through the API
             grep -E 'error:' build.log | sort -u | head -n 50 | while IFS= read -r line; do
               echo "::error title=xcodebuild::${line#$GITHUB_WORKSPACE/}"
             done
             exit 1
           }
-          grep -E 'warning:' build.log | sort -u | head -n 10 | while IFS= read -r line; do
+          grep -E 'warning:' build.log | grep -v -E 'appintents|Metadata extraction' | sort -u | head -n 10 | while IFS= read -r line; do
             echo "::warning title=xcodebuild::${line#$GITHUB_WORKSPACE/}"
           done
 
-      - name: Sign ad-hoc and package
-        if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'release')
+      - name: Sign ad-hoc (stable designated requirement)
+        if: env.DO_PACKAGE == 'true'
         shell: bash
         run: |
           APP=macos/build/Build/Products/Release/Auracaster.app
-          codesign --force --deep --sign - "$APP"
+          # Designated requirement = bundle identifier only (instead of the cdhash of an ad-hoc
+          # signature), so macOS privacy permissions survive updates.
+          codesign --force --deep --sign - --identifier de.groovex.Auracaster \
+            --requirements '=designated => identifier "de.groovex.Auracaster"' "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
-          ditto -c -k --sequesterRsrc --keepParent "$APP" Auracaster-macOS.zip
-          ls -l Auracaster-macOS.zip
+          codesign -d -r- "$APP" 2>&1 | tail -n 2
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist"
+          ls "$APP/Contents/Resources"
+
+      - name: Screenshots (screenshot mode, light + dark)
+        if: env.DO_PACKAGE == 'true'
+        continue-on-error: true
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          APP="$PWD/macos/build/Build/Products/Release/Auracaster.app"
+          OUT="$PWD/screenshots"; rm -rf "$OUT"; mkdir -p "$OUT"
+          sw_vers; system_profiler SPDisplaysDataType 2>/dev/null | grep -E 'Resolution|Display Type' || true
+          "$APP/Contents/MacOS/Auracaster" -AuracasterExportScreenshots "$OUT" \
+            -ApplePersistenceIgnoreState YES -NSQuitAlwaysKeepsWindows NO > "$OUT/app-stdout.txt" 2>&1 &
+          PID=$!
+          end=$((SECONDS + 300))
+          while kill -0 $PID 2>/dev/null && [ $SECONDS -lt $end ]; do
+            for req in "$OUT"/request-*.txt; do
+              [ -e "$req" ] || continue
+              name=$(basename "$req" .txt); name=${name#request-}
+              wid=$(cat "$req")
+              if [ ! -e "$OUT/ack-$name" ]; then
+                screencapture -x -l "$wid" "$OUT/window-$name.png" 2>>"$OUT/screencapture-errors.txt" || echo "screencapture failed: $name" >> "$OUT/screencapture-errors.txt"
+                touch "$OUT/ack-$name"
+              fi
+            done
+            sleep 0.2
+          done
+          kill $PID 2>/dev/null || true
+          screencapture -x "$OUT/fullscreen.png" 2>>"$OUT/screencapture-errors.txt" || true
+          rm -f "$OUT"/ack-* "$OUT"/request-*
+          ls -l "$OUT"; cat "$OUT/export-log.txt" || true; cat "$OUT/screencapture-errors.txt" 2>/dev/null || true
+          [ -e "$OUT/done" ] || echo "::warning title=screenshots::export did not finish"
 
       - uses: actions/upload-artifact@v4
-        if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'release')
+        if: env.DO_PACKAGE == 'true'
+        with:
+          name: screenshots
+          path: screenshots/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Package ZIP + DMG
+        if: env.DO_PACKAGE == 'true'
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+          HOMEBREW_NO_INSTALL_CLEANUP: '1'
+        run: |
+          set -euo pipefail
+          V="${{ steps.version.outputs.version }}"
+          APP=macos/build/Build/Products/Release/Auracaster.app
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent "$APP" dist/Auracaster-macOS.zip
+
+          # DMG contents: app, illustrated guide, Gatekeeper fix
+          STAGE=$(mktemp -d)/Auracaster
+          mkdir -p "$STAGE"
+          ditto "$APP" "$STAGE/Auracaster.app"
+          python3 macos/Installer/make_liesmich.py "$STAGE/Zuerst lesen.html" "$V" screenshots docs/images
+          cp macos/Installer/Gatekeeper-Fix.command "$STAGE/"
+          chmod +x "$STAGE/Gatekeeper-Fix.command"
+
+          BG=macos/Installer/dmg-background.png
+          tiffutil -cathidpicheck "$BG" macos/Installer/dmg-background@2x.png -out /tmp/dmg-bg.tiff
+          ICNS="$APP/Contents/Resources/AppIcon.icns"
+          brew install create-dmg >/dev/null 2>&1 || brew install create-dmg
+          DMG="dist/Auracaster-macOS.dmg"   # stable name → releases/latest/download/Auracaster-macOS.dmg
+          args=( --volname "Auracaster $V" --background /tmp/dmg-bg.tiff
+                 --window-pos 200 120 --window-size 680 480 --icon-size 96 --text-size 13
+                 --icon "Auracaster.app" 175 205 --hide-extension "Auracaster.app"
+                 --app-drop-link 505 205
+                 --icon "Zuerst lesen.html" 265 385 --icon "Gatekeeper-Fix.command" 415 385
+                 --hdiutil-retries 10 )
+          [ -f "$ICNS" ] && args+=( --volicon "$ICNS" )
+          if ! create-dmg "${args[@]}" "$DMG" "$STAGE"; then
+            echo "::warning title=dmg::Finder layout failed, retrying without AppleScript (--skip-jenkins)"
+            rm -f "$DMG" dist/rw.*.dmg
+            create-dmg "${args[@]}" --skip-jenkins "$DMG" "$STAGE"
+          fi
+          hdiutil verify "$DMG"
+          ls -l dist
+
+      - name: DMG preview (mount + Finder window capture)
+        if: env.DO_PACKAGE == 'true'
+        continue-on-error: true
+        shell: bash
+        run: |
+          DMG=dist/Auracaster-macOS.dmg
+          hdiutil attach "$DMG" -mountpoint /tmp/aurdmg >/dev/null
+          open /tmp/aurdmg; sleep 4
+          WID=$(swift -e 'import CoreGraphics; let l = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as! [[String: Any]]; for w in l where (w["kCGWindowOwnerName"] as? String) == "Finder" && ((w["kCGWindowBounds"] as? [String: Any])?["Width"] as? Double ?? 0) > 400 { print(w["kCGWindowNumber"]!); break }' 2>/dev/null | head -1)
+          echo "Finder window: $WID"
+          [ -n "$WID" ] && screencapture -x -l "$WID" screenshots/dmg-window.png || screencapture -x screenshots/dmg-fullscreen.png
+          hdiutil detach /tmp/aurdmg -force >/dev/null || true
+          ls -l screenshots | tail -n 3
+
+      - uses: actions/upload-artifact@v4
+        if: env.DO_PACKAGE == 'true'
         with:
           name: Auracaster-macOS
-          path: Auracaster-macOS.zip
+          path: |
+            dist/Auracaster-macOS.zip
+            dist/Auracaster-macOS.dmg
           retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        if: env.DO_PACKAGE == 'true'
+        with:
+          name: dmg-preview
+          path: screenshots/dmg-*.png
+          if-no-files-found: ignore
+          retention-days: 14
 
       - uses: actions/upload-artifact@v4
         if: failure()
@@ -124,12 +248,82 @@ jobs:
           path: macos/build.log
           retention-days: 7
 
+  firmware:
+    name: Dongle firmware (release only)
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/firmware.yml
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [ engine, build, firmware ]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: Auracaster-macOS
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: auracaster-dongle-uf2
+          path: fw
+      - name: Assemble assets + notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          V="${{ needs.build.outputs.version }}"
+          (cd fw && zip -q -r ../dist/Auracaster-Dongle-Firmware-$V.zip .)
+          cp fw/*.uf2 dist/
+          ls -l dist
+          {
+            echo "## Auracaster $V"
+            echo
+            echo "Mac-Audio als **Auracast™-Broadcast** an beliebig viele Hörgeräte, Kopfhörer und Lautsprecher."
+            echo
+            echo "### Download"
+            echo "| Datei | Wofür |"
+            echo "|---|---|"
+            echo "| **Auracaster-macOS.dmg** | App für macOS 26+ (Apple-Chip). DMG öffnen, App auf *Programme* ziehen, *Zuerst lesen* öffnen. |"
+            echo "| Auracaster-macOS.zip | Dieselbe App als ZIP (für den eingebauten Updater und \`install.sh\`). |"
+            echo "| auracaster-dongle-s140v6-0x26000.uf2 | Dongle-Firmware, **häufigster Fall** (INFO_UF2.TXT: \`SoftDevice: S140 version 6.x\`) |"
+            echo "| auracaster-dongle-s140v7-0x27000.uf2 | Firmware für \`SoftDevice: S140 version 7.x\` |"
+            echo "| auracaster-dongle-nosd-0x1000.uf2 | Firmware für \`SoftDevice: not found\` |"
+            echo "| Auracaster-Dongle-Firmware-$V.zip | Alle Firmware-Dateien + BUILDINFO |"
+            echo
+            echo "### Ohne Gatekeeper-Warnung installieren (Terminal)"
+            echo '```sh'
+            echo 'curl -fsSL https://raw.githubusercontent.com/thegroovex/Auracaster/main/macos/Installer/install.sh | bash'
+            echo '```'
+            echo
+            echo "Die App ist ad-hoc signiert, nicht notarisiert. Beim ersten Start aus dem DMG: *Systemeinstellungen → Datenschutz & Sicherheit → Dennoch öffnen* (Details im README)."
+            echo
+            echo "**Status:** frühe Version. Gesendet wird aktuell **ein** Stream (Stream 1); Streams 2/3 der Routing-Matrix sind in Arbeit. Hardware-Tests mit echten Empfängern laufen."
+          } > notes.md
+          cat notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Auracaster ${{ needs.build.outputs.version }}
+          body_path: notes.md
+          generate_release_notes: true
+          make_latest: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/Auracaster-macOS.dmg
+            dist/Auracaster-macOS.zip
+            dist/Auracaster-Dongle-Firmware-*.zip
+            dist/*.uf2
+
   result:
     name: CI result
     if: always()
-    needs: [ engine, build ]
+    needs: [ engine, build, firmware, release ]
     runs-on: ubuntu-24.04
     steps:
       - run: |
-          echo "engine=${{ needs.engine.result }} build=${{ needs.build.result }}"
-          [ "${{ needs.engine.result }}" = success ] && [ "${{ needs.build.result }}" = success ]
+          echo "engine=${{ needs.engine.result }} build=${{ needs.build.result }} firmware=${{ needs.firmware.result }} release=${{ needs.release.result }}"
+          ok() { [ "$1" = success ] || [ "$1" = skipped ]; }
+          [ "${{ needs.engine.result }}" = success ] && [ "${{ needs.build.result }}" = success ] \
+            && ok "${{ needs.firmware.result }}" && ok "${{ needs.release.result }}"
