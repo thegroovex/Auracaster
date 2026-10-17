@@ -90,6 +90,8 @@ enum ScreenshotExporter {
 
             for (item, name) in shots {
                 ScreenshotDirector.shared.sidebarItem = item
+                NSApp.activate(ignoringOtherApps: true)
+                window.makeKeyAndOrderFront(nil)
                 try? await Task.sleep(for: .seconds(1.2))
                 await capture(window: window, name: "\(name)-\(suffix)", directory: directory, note: note)
             }
@@ -131,7 +133,7 @@ enum ScreenshotExporter {
         let hosting = NSHostingView(rootView: view)
         let size = hosting.fittingSize
         let style: NSWindow.StyleMask = transparent ? [.borderless] : [.titled, .fullSizeContentView]
-        let window = NSWindow(
+        let window = KeyableWindow(
             contentRect: NSRect(origin: .zero, size: NSSize(width: max(size.width, 200), height: max(size.height, 200))),
             styleMask: style, backing: .buffered, defer: false
         )
@@ -147,6 +149,8 @@ enum ScreenshotExporter {
             window.titleVisibility = .hidden
         }
         window.center()
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
         try? await Task.sleep(for: .seconds(1.2))
         await capture(window: window, name: name, directory: directory, note: note)
@@ -179,4 +183,10 @@ enum ScreenshotExporter {
         }
         try? FileManager.default.removeItem(at: request)
     }
+}
+
+/// Borderless showcase windows must become key, otherwise controls render inactive (greyed).
+private final class KeyableWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
 }

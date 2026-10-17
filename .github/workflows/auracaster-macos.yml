@@ -196,10 +196,10 @@ jobs:
           brew install create-dmg >/dev/null 2>&1 || brew install create-dmg
           DMG="dist/Auracaster-macOS.dmg"   # stable name → releases/latest/download/Auracaster-macOS.dmg
           args=( --volname "Auracaster $V" --background /tmp/dmg-bg.tiff
-                 --window-pos 200 120 --window-size 680 480 --icon-size 96 --text-size 13
+                 --window-pos 200 120 --window-size 680 528 --icon-size 96 --text-size 13
                  --icon "Auracaster.app" 175 205 --hide-extension "Auracaster.app"
                  --app-drop-link 505 205
-                 --icon "Zuerst lesen.html" 265 385 --icon "Gatekeeper-Fix.command" 415 385
+                 --icon "Zuerst lesen.html" 255 410 --icon "Gatekeeper-Fix.command" 425 410
                  --hdiutil-retries 10 )
           [ -f "$ICNS" ] && args+=( --volicon "$ICNS" )
           if ! create-dmg "${args[@]}" "$DMG" "$STAGE"; then

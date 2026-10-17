@@ -4,7 +4,7 @@ Auracaster sendet Audio vom Mac – das gesamte Systemaudio, einzelne Apps (z. B
 
 Ziele: niedrige Latenz (Preset *Ultra-Low* ≈ 18 ms), eine native Mac-Oberfläche für macOS 27 „Golden Gate“ und eine Menüleisten-Steuerung im Stil des Kontrollzentrums.
 
-> Status: **erstes Gerüst** (v0.1). UI, Engine-Protokoll und Python-Helper stehen; der Audio-Pfad ist bis zur FIFO verdrahtet, aber noch nicht mit echter Hardware getestet.
+> Status: **v0.1**. UI, Engine-Protokoll, Python-Helper, Updater, Assistent und Installer stehen; der Audio-Pfad ist bis zur FIFO verdrahtet, aber noch nicht mit echter Hardware getestet.
 
 ## Architektur
 
@@ -22,9 +22,9 @@ Ziele: niedrige Latenz (Preset *Ultra-Low* ≈ 18 ms), eine native Mac-Oberfläc
          ▼                                   ▼
   engine/auracaster_helper.py  ◀──── PCMTransport: Named Pipe (FIFO)  → später Shared-Memory-Ringpuffer
   (Python, Bumble aus diesem Repo, LC3-Encoder via lc3py)
-         │  HCI über USB (libusb)
+         │  HCI H4 über USB-CDC (serial, Transport auto)
          ▼
-  USB-HCI-Dongle: nRF52840 mit Zephyr `samples/bluetooth/hci_usb`
+  Auracaster Dongle: nRF52840 (Pro Micro), Zephyr `hci_uart` (H4 über USB-CDC)
   (CONFIG_BT_ISO_BROADCASTER, CONFIG_BT_CTLR_ADV_ISO, Periodic Advertising)
          │  Extended + Periodic Advertising, BIG/BIS (LC3, 48 kHz, 7,5/10 ms)
          ▼
@@ -88,19 +88,52 @@ Ein mehrschichtiges Icon-Composer-Icon (hell/dunkel/getönt/klar) ist ein offene
 
 ## Fertige App laden
 
-Jeder Push auf `main`, der `macos/`, `engine/` oder den Workflow ändert, baut die App per GitHub Actions (Workflow *Auracaster macOS app*, Runner `macos-26`, Xcode 26). Ohne eigenes Xcode:
+Für Nutzer: **[Auracaster-macOS.dmg](https://github.com/thegroovex/Auracaster/releases/latest/download/Auracaster-macOS.dmg)** aus dem
+[neuesten Release](https://github.com/thegroovex/Auracaster/releases/latest) – die bebilderte Schritt-für-Schritt-Anleitung steht im
+[Haupt-README](../README.md#installation-schritt-für-schritt) und als „Zuerst lesen“ im DMG. Ohne Gatekeeper-Abfrage per Terminal:
 
-1. Im Repo auf **Actions** → *Auracaster macOS app* → den neuesten grünen Lauf öffnen.
-2. Unten unter **Artifacts** `Auracaster-macOS` herunterladen (GitHub-Login nötig; Artefakte bleiben 30 Tage).
-3. Entpacken – darin liegt `Auracaster-macOS.zip`, das nochmal entpacken – und `Auracaster.app` nach `/Programme` ziehen.
-4. Die App ist nur ad-hoc signiert (nicht notarisiert). Quarantäne entfernen, sonst meldet Gatekeeper „beschädigt“:
-   ```sh
-   xattr -dr com.apple.quarantine /Applications/Auracaster.app
-   ```
-5. Beim ersten Start fragt macOS nach **Mikrofon** (Mikrofone/Audio-Interfaces als Quelle) und **Audio-Aufnahme** (Systemaudio/einzelne Apps per Process Tap). Beides erlauben; nachträglich unter *Systemeinstellungen → Datenschutz & Sicherheit → Mikrofon* bzw. *Bildschirm- & Systemaudioaufnahme*.
-6. Der Python-Helper `auracaster_helper.py` liegt bereits im Bundle (`Contents/Resources`). Für den echten Dongle-Betrieb trotzdem die Python-Umgebung aus [Build](#build), Schritt 2, anlegen und in den Einstellungen den Pfad zu `.venv/bin/python` eintragen.
+```sh
+curl -fsSL https://raw.githubusercontent.com/thegroovex/Auracaster/main/macos/Installer/install.sh | bash
+```
 
-Hinweis: Weil die Signatur bei jedem Build neu ad-hoc erzeugt wird, kann macOS die Berechtigungen nach einem Update erneut abfragen.
+Zwischenstände: jeder Push auf `main` baut unter **Actions → Auracaster macOS app** die Artefakte `Auracaster-macOS` (ZIP + DMG) und `screenshots`.
+
+## Erster Start, Engine, Updates
+
+| Baustein | Datei(en) | Aufgabe |
+|---|---|---|
+| Willkommens-Assistent | `Onboarding/OnboardingView.swift` | 4 Schritte (Was ist Auracaster → Dongle → Engine & Audio → erster Stream); erneut über *Hilfe → Einrichtungsassistent …* |
+| Dongle-Erkennung | `Onboarding/DongleDetector.swift` | IOKit: USB `2fe3:0004` („Auracaster Dongle“), UF2-Bootloader-Laufwerk (`INFO_UF2.TXT`), `/dev/cu.usbmodem*` |
+| Engine-Einrichtung | `Onboarding/EngineSetup.swift`, `../engine/setup-engine.sh` | Ein Klick: `uv` → Python 3.12-venv in `~/Library/Application Support/Auracaster/venv` → Bumble (Tarball dieses Repos, Tag = App-Version) + lc3py; stellt danach Engine *Bumble* + Transport `auto` ein. Kein Xcode/Homebrew/git nötig. `BumbleEngineClient` nimmt dieses venv automatisch, solange kein eigener Python-Pfad gesetzt ist. |
+| Updater | `Update/UpdateService.swift`, `Update/UpdateController.swift`, `Update/UpdateSheet.swift` | GitHub-Releases-API (`/releases/latest`), SemVer-Vergleich, Sheet mit Release-Notes, Download (ZIP bevorzugt, DMG möglich) mit Fortschritt, Entpacken (`ditto`/`hdiutil`), Prüfung von Bundle-ID und Signatur (`codesign --verify`), Austausch nach dem Beenden durch ein Hilfsskript (Backup + Rollback, `xattr -dr com.apple.quarantine`, Neustart). Menü *Auracaster → Nach Updates suchen …*, Menüleiste (⋯), Toolbar-Badge, Einstellung „Automatisch täglich prüfen“ (Standard an). |
+
+Warum kein Sparkle? Ohne Developer-ID und EdDSA-Schlüsselinfrastruktur bringt es wenig; per `URLSession` geladene Dateien bekommen
+ohnehin kein Quarantäne-Attribut, Updates lösen also kein Gatekeeper aus.
+
+**Signatur:** Release-Builds sind ad-hoc signiert mit fester designierter Anforderung
+(`codesign -s - -r='=designated => identifier "de.groovex.Auracaster"'`), damit Datenschutz-Freigaben (Audioaufnahme, Mikrofon) Updates überleben.
+Nicht notarisiert – deshalb DMG mit *Gatekeeper-Fix.command* und Anleitung „Dennoch öffnen“.
+
+## Screenshot-Modus (Doku-Bilder aus der echten App)
+
+```sh
+Auracaster.app/Contents/MacOS/Auracaster -AuracasterExportScreenshots /tmp/shots
+```
+
+Startet mit `MockEngine` und Demo-Daten (On Air), überspringt Assistent und Update-Prüfung, schaltet Studio, Routing, Empfänger,
+Quellen und Einstellungen sowie Menüleisten-Panel, Assistent und Update-Dialog jeweils hell und dunkel durch und schreibt
+`app-<name>.png` (In-Process-Rendering per `cacheDisplay`) bzw. – wenn ein Helfer auf `request-<name>.txt` mit `screencapture -l <id>`
+antwortet – `window-<name>.png` (Compositor-Aufnahme inkl. Liquid Glass). Die CI macht genau das (`ScreenshotMode.swift`, Workflow-Schritt
+*Screenshots*); die besten Bilder liegen in [`../docs/images/`](../docs/images/).
+
+## Installer & Release
+
+- `Installer/make_artwork.py` – rendert DMG-Hintergrund und Anleitungsgrafiken (`docs/images/guide-*.png`).
+- `Installer/make_liesmich.py` – baut „Zuerst lesen.html“ (offline, Bilder eingebettet) für das DMG.
+- `Installer/Gatekeeper-Fix.command`, `Installer/install.sh` – Quarantäne entfernen bzw. Installation per Terminal.
+- Workflow `.github/workflows/auracaster-macos.yml`: Build → Signatur → Screenshots → ZIP + DMG (create-dmg). Nur bei Tags `v*`
+  zusätzlich Firmware (`firmware.yml` als Reusable Workflow) und Veröffentlichung per `softprops/action-gh-release`.
+  Neues Release: Version in `project.yml` anheben, `git tag vX.Y.Z && git push origin vX.Y.Z` (die Version im Build kommt aus dem Tag).
 
 ## Build
 
@@ -122,8 +155,8 @@ python3 -m venv .venv
 In der App unter **Einstellungen → Engine**:
 
 - Engine: *Bumble (USB-Dongle)* (Standard ist *Simulation*), danach App neu starten.
-- Python: Pfad zu `.venv/bin/python` (absolut).
-- Transport: `usb:0` oder gezielt per VID/PID, z. B. `usb:2FE3:000B` (typisch für Zephyr `hci_usb`; mit `bumble-usb-probe` prüfen).
+- Python: Pfad zu `.venv/bin/python` (absolut) – oder leer lassen, dann nimmt die App das venv aus *Engine einrichten*.
+- Transport: `auto` (Standard: findet den Auracaster Dongle als `serial:/dev/cu.usbmodem…,resync`), alternativ explizit `serial:…` oder `usb:0`.
 - Hinweis: `/usr/bin/python3` von macOS ist zu alt (Bumble braucht ≥ 3.11) – unbedingt das venv angeben.
 
 Helper ohne App testen:
@@ -136,16 +169,8 @@ Helper ohne App testen:
 
 ### Dongle vorbereiten (nRF52840)
 
-Zephyr-Sample `samples/bluetooth/hci_usb` mit ISO-Broadcast bauen, z. B. für den nRF52840-Dongle:
-
-```sh
-west build -b nrf52840dongle/nrf52840 samples/bluetooth/hci_usb -- \
-  -DCONFIG_BT_CTLR_ADV_EXT=y -DCONFIG_BT_CTLR_ADV_PERIODIC=y \
-  -DCONFIG_BT_CTLR_ADV_ISO=y -DCONFIG_BT_ISO_BROADCASTER=y \
-  -DCONFIG_BT_CTLR_ISO_TX_BUFFERS=8 -DCONFIG_BT_CTLR_ISO_TX_BUFFER_SIZE=251
-```
-
-(Die genauen Kconfig-Optionen hängen von der Zephyr-Version ab; ggf. das Overlay aus `samples/bluetooth/hci_uart`/`iso_broadcast` übernehmen.)
+Fertige UF2-Dateien liegen in jedem Release; Quelle, Bootloader-Varianten und Selbstbau in [`../firmware/README.md`](../firmware/README.md)
+(Zephyr `hci_uart` = HCI H4 über USB-CDC, weil Zephyrs `hci_usb` keinen ISO-Datenpfad hat).
 
 ### Berechtigungen
 

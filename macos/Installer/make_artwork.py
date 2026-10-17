@@ -74,7 +74,7 @@ def folder(x: float, y: float, s: float = 1.0) -> str:
 
 
 def dmg_background() -> str:
-    w, h = 680, 480
+    w, h = 680, 500
     return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">{defs()}
   <rect width="{w}" height="{h}" fill="url(#soft)"/>
   <circle cx="175" cy="205" r="110" fill="url(#glow)"/>
@@ -83,9 +83,9 @@ def dmg_background() -> str:
   <text x="40" y="76" font-family="{FONT}" font-size="14" fill="#5B5675">Mac-Audio als Auracast™ – an beliebig viele Hörgeräte &amp; Kopfhörer</text>
   <path d="M262,196 C320,150 380,150 438,196" fill="none" stroke="{VIOLET}" stroke-width="6" stroke-linecap="round" marker-end="url(#head)"/>
   <text x="350" y="138" text-anchor="middle" font-family="{FONT}" font-size="15" font-weight="700" fill="{VIOLET}">1 · in „Programme“ ziehen</text>
-  <rect x="24" y="302" width="632" height="1" fill="{VIOLET}" fill-opacity=".18"/>
-  <text x="340" y="330" text-anchor="middle" font-family="{FONT}" font-size="14" font-weight="700" fill="{DEEP}">2 · Erster Start? Hier steht alles – mit Bildern</text>
-  <text x="340" y="350" text-anchor="middle" font-family="{FONT}" font-size="12.5" fill="#5B5675">macOS blockiert den Start? → „Dennoch öffnen“ in den Systemeinstellungen oder Gatekeeper-Fix</text>
+  <rect x="24" y="292" width="632" height="1" fill="{VIOLET}" fill-opacity=".18"/>
+  <text x="340" y="318" text-anchor="middle" font-family="{FONT}" font-size="14" font-weight="700" fill="{DEEP}">2 · Erster Start? Hier steht alles – mit Bildern</text>
+  <text x="340" y="337" text-anchor="middle" font-family="{FONT}" font-size="12.5" fill="#5B5675">macOS blockiert den Start? → „Dennoch öffnen“ in den Systemeinstellungen oder Gatekeeper-Fix</text>
 </svg>"""
 
 
@@ -228,8 +228,8 @@ def guide_flash() -> str:
 
 
 if __name__ == "__main__":
-    render(dmg_background(), ROOT / "macos/Installer/dmg-background.png", 680, 480)
-    render(dmg_background(), ROOT / "macos/Installer/dmg-background@2x.png", 680, 480, 2)
+    render(dmg_background(), ROOT / "macos/Installer/dmg-background.png", 680, 500)
+    render(dmg_background(), ROOT / "macos/Installer/dmg-background@2x.png", 680, 500, 2)
     render(guide_install(), ROOT / "docs/images/guide-install.png", 1200, 600)
     render(guide_gatekeeper(), ROOT / "docs/images/guide-gatekeeper.png", 1200, 720)
     render(guide_flash(), ROOT / "docs/images/guide-flash.png", 1400, 560)

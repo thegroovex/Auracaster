@@ -48,10 +48,18 @@ struct StudioView: View {
 
     private func header(name: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            TextField("Broadcast-Name", text: name)
-                .textFieldStyle(.plain)
-                .font(.system(size: 40, weight: .bold))
-                .disabled(model.isLive)
+            Group {
+                if model.isLive {
+                    // A disabled plain TextField draws clipped at this size – show plain text while live.
+                    Text(name.wrappedValue)
+                        .lineLimit(1)
+                } else {
+                    TextField("Broadcast-Name", text: name)
+                        .textFieldStyle(.plain)
+                }
+            }
+            .font(.system(size: 40, weight: .bold))
+            .frame(minHeight: 50, alignment: .leading)
             HStack(spacing: 8) {
                 Image(systemName: model.selectedSource?.symbol ?? "speaker.wave.2.fill")
                     .foregroundStyle(.blue)
