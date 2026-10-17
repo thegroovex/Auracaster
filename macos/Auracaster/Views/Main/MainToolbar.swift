@@ -20,6 +20,10 @@ struct MainToolbar: ToolbarContent {
         }
 
         ToolbarItem(placement: .primaryAction) {
+            FirmwareBadgeButton()
+        }
+
+        ToolbarItem(placement: .primaryAction) {
             UpdateBadgeButton()
         }
 
@@ -62,5 +66,22 @@ struct SourcePickerMenu: View {
                 .labelStyle(.titleAndIcon)
         }
         .help("Audioquelle des Broadcasts")
+    }
+}
+
+/// "Firmware-Update" when the connected dongle runs older firmware than the app ships.
+struct FirmwareBadgeButton: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        if let version = DongleAssistant.shared.update(for: model.dongleFirmware) {
+            Button {
+                DongleAssistant.shared.isSheetPresented = true
+            } label: {
+                Label("Firmware", systemImage: "cpu")
+            }
+            .tint(.orange)
+            .help("Dongle-Firmware \(version.description) verfügbar – Dongle-Assistent öffnen")
+        }
     }
 }

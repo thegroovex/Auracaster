@@ -90,6 +90,7 @@ import asyncio
 import concurrent.futures
 import contextlib
 import dataclasses
+import errno
 import functools
 import json
 import logging
@@ -104,7 +105,7 @@ import traceback
 from collections.abc import AsyncGenerator
 from typing import Any
 
-HELPER_VERSION = '0.1.1'
+HELPER_VERSION = '0.1.2'
 PROTOCOL_VERSION = 2
 
 # -----------------------------------------------------------------------------
@@ -227,6 +228,53 @@ def find_dongle_serial_port() -> str | None:
     return sorted(candidates)[0][1] if candidates else None
 
 
+# Auracaster firmware identity (firmware/common/auracaster_fw.h, >= 0.1.2)
+AURA_OP_READ_INFO = 0xFF50
+AURA_ROLES = {1: 'dongle', 2: 'repeater'}
+AURA_VARIANTS = {1: 's140v6', 2: 's140v7', 3: 'nosd'}
+
+
+def parse_auracaster_info(data: bytes | None) -> dict[str, Any] | None:
+    """Return parameters of HCI vendor command 0xFF50 (status byte first)."""
+    if data is None or len(data) < 11 or data[0] != 0 or data[1:5] != b'AURA':
+        return None
+    role = AURA_ROLES.get(data[6])
+    if role is None:
+        return None
+    info: dict[str, Any] = {
+        'firmware_role': role,
+        'firmware_variant': AURA_VARIANTS.get(data[7]),
+        'firmware_version': f'{data[8]}.{data[9]}.{data[10]}',
+        'firmware_flags': data[11] if len(data) > 11 else 0,
+    }
+    if len(data) >= 16:
+        info['firmware_load_address'] = '0x%x' % int.from_bytes(data[12:16], 'little')
+    return info
+
+
+async def read_auracaster_info(host: Any) -> dict[str, Any]:
+    """Ask the dongle who it is. Firmware <= 0.1.1 answers "Unknown HCI Command"."""
+    try:
+        response = await host.send_command(
+            hci.HCI_Command(b'', op_code=AURA_OP_READ_INFO), response_timeout=2.0
+        )
+    except Exception as error:  # pylint: disable=broad-except
+        logger.info('no Auracaster firmware identity: %s', error)
+        return {'firmware_legacy': True}
+    parameters = getattr(response, 'return_parameters', None)
+    data = getattr(parameters, 'data', parameters)
+    info = parse_auracaster_info(bytes(data) if isinstance(data, (bytes, bytearray)) else None)
+    if info is None:
+        return {'firmware_legacy': True}
+    logger.info(
+        'Auracaster firmware %s (%s, %s)',
+        info['firmware_version'],
+        info['firmware_role'],
+        info['firmware_variant'],
+    )
+    return info
+
+
 def resolve_transport(spec: str) -> str:
     """Map "auto" to the dongle's serial port (with HCI resync), else usb:0."""
     if spec != 'auto':
@@ -259,6 +307,8 @@ class Preset:
     prefill: int = 0
     # Jitter buffer target between capture and encoder in ms, 0 = auto
     jitter_ms: int = 0
+    # BIS packing in the BIG: 'sequential' (default) or 'interleaved'
+    packing: str = 'sequential'
 
     @classmethod
     def from_json(cls, data: dict[str, Any] | None) -> Preset:
@@ -267,6 +317,10 @@ class Preset:
             raise ValueError('frame_duration_us must be 7500 or 10000')
         if preset.sample_rate_hz not in (0, 16000, 24000, 32000, 48000):
             raise ValueError('sample_rate_hz must be 16000, 24000, 32000 or 48000')
+        if preset.packing not in ('sequential', 'interleaved'):
+            raise ValueError('packing must be sequential or interleaved')
+        if not 0 <= preset.jitter_ms <= 250:
+            raise ValueError('jitter_ms must be 0..250')
         return preset
 
     @property
@@ -501,27 +555,68 @@ class WavRecorder:
 class FramePicker:
     """Takes one encoder frame from the ring, absorbing clock drift.
 
-    Fill above target+window → one sample dropped from this frame,
-    fill below target-window → one sample repeated. One sample per frame
-    (≈2000 ppm at 10 ms) is far beyond real crystal drift and inaudible.
-    Empty ring → silence frame (underrun) until the target fill is back.
+    * Real clock drift (crystal ppm): fill above target+window → one sample
+      dropped, below target-window → one sample repeated, at most one slip
+      every `slip_spacing` frames (25/s at 10 ms – far above real drift, but
+      a backlog can no longer be "slipped away" for 90 s like in v0.1.1).
+    * Backlog after a stall (radio or host): fill above `flush_above`
+      (2 × target + window) → jump straight back to the target once, with a
+      short fade-in, instead of hundreds of slips per second.
+    * Empty ring → silence frame (underrun) until the target fill is back.
     """
 
-    def __init__(self, ring: PcmRing, frame_samples: int, target_frames: int) -> None:
+    FADE_SAMPLES = 64
+
+    def __init__(
+        self,
+        ring: PcmRing,
+        frame_samples: int,
+        target_frames: int,
+        channels: int = 2,
+        float_samples: bool = True,
+        sample_rate: int = 48000,
+    ) -> None:
         self.ring = ring
+        self.sample_rate = sample_rate
         self.frame_samples = frame_samples
         self.target = max(frame_samples, target_frames)
         # Core Audio writes in ~512-frame chunks: the instantaneous fill jumps by
         # that much, so drift is judged on a smoothed fill with a wide window.
         self.window = max(frame_samples, 512)
+        self.flush_above = 2 * self.target + self.window
+        self.slip_spacing = 4
+        self.channels = channels
+        self.float_samples = float_samples
         self.average: float | None = None
         self.silence = bytes(frame_samples * ring.bytes_per_frame)
         self.buffering = True
         self.underruns = 0
         self.slips_dropped = 0
         self.slips_inserted = 0
+        self.flushes = 0
+        self.flushed_frames = 0
+        self._since_slip = 0
+        self._fade_in = False
+
+    def _fade(self, data: bytes) -> bytes:
+        samples = array.array('f' if self.float_samples else 'h', data)
+        frames = min(self.FADE_SAMPLES, len(samples) // self.channels)
+        for frame in range(frames):
+            gain = (frame + 1) / (frames + 1)
+            for channel in range(self.channels):
+                index = frame * self.channels + channel
+                value = samples[index] * gain
+                samples[index] = value if self.float_samples else int(value)
+        return samples.tobytes()
 
     def next(self) -> bytes:
+        data = self._next()
+        if self._fade_in and data is not self.silence:
+            self._fade_in = False
+            return self._fade(data)
+        return data
+
+    def _next(self) -> bytes:
         fill = self.ring.frames
         n = self.frame_samples
         if self.buffering:
@@ -529,25 +624,48 @@ class FramePicker:
                 return self.silence
             self.buffering = False
             self.average = float(fill)
+            if fill > self.target + self.window:
+                self.ring.read(fill - self.target)  # start at the target, not at a backlog
+                fill = self.target
         if fill < n:
             self.underruns += 1
             self.buffering = True
+            self._fade_in = True
             return self.silence
         assert self.average is not None
+        if fill > self.flush_above:
+            drop = fill - self.target
+            self.ring.read(drop)
+            self.flushes += 1
+            self.flushed_frames += drop
+            self.average = float(self.target)
+            self._fade_in = True
+            logger.warning(
+                'jitter buffer backlog %.0f ms -> flushed back to %.0f ms',
+                fill * 1000 / self.sample_rate,
+                self.target * 1000 / self.sample_rate,
+            )
+            fill = self.ring.frames
+            if fill < n:
+                return self.silence
         self.average += 0.02 * (fill - self.average)  # ~0.5 s time constant
+        self._since_slip += 1
         bpf = self.ring.bytes_per_frame
-        if self.average > self.target + self.window and fill >= n + 1:
-            data = self.ring.read(n + 1)
-            if data is not None:
-                self.slips_dropped += 1
-                self.average -= 1
-                return data[:-bpf]
-        if self.average < self.target - self.window // 2:
-            data = self.ring.read(n - 1)
-            if data is not None:
-                self.slips_inserted += 1
-                self.average += 1
-                return data + data[-bpf:]
+        if self._since_slip >= self.slip_spacing:
+            if self.average > self.target + self.window and fill >= n + 1:
+                data = self.ring.read(n + 1)
+                if data is not None:
+                    self.slips_dropped += 1
+                    self.average -= 1
+                    self._since_slip = 0
+                    return data[:-bpf]
+            if self.average < self.target - self.window // 2:
+                data = self.ring.read(n - 1)
+                if data is not None:
+                    self.slips_inserted += 1
+                    self.average += 1
+                    self._since_slip = 0
+                    return data + data[-bpf:]
         return self.ring.read(n) or self.silence
 
 
@@ -590,6 +708,7 @@ class PipelineStats:
         self.encode_sum = 0.0
         self.encode_max = 0.0
         self.loop_max = 0.0
+        self.radio_wait_max = 0.0
 
     def add(self, encode_ms: float, loop_ms: float) -> None:
         self.frames += 1
@@ -629,6 +748,8 @@ class Engine:
         self.needs_reset = False
         self.resets = 0
         self.last_stats: dict[str, Any] = {}
+        self.firmware: dict[str, Any] = {}
+        self.big_info: dict[str, Any] = {}
 
     # -- device ----------------------------------------------------------------
     async def ensure_device(self) -> bumble.device.Device:
@@ -639,9 +760,23 @@ class Engine:
                 # dongle may have been plugged in (or re-enumerated) since launch
                 self.transport_name = resolve_transport('auto')
             logger.info('opening transport %s', self.transport_name)
-            try:
-                transport = await bumble.transport.open_transport(self.transport_name)
-            except Exception as error:
+            transport = None
+            last_error: Exception | None = None
+            # A previous helper may still be closing the port ([Errno 16] Resource busy).
+            for attempt in range(10):
+                try:
+                    transport = await bumble.transport.open_transport(self.transport_name)
+                    break
+                except Exception as error:  # pylint: disable=broad-except
+                    last_error = error
+                    busy = isinstance(error, OSError) and error.errno == errno.EBUSY
+                    busy = busy or 'Resource busy' in str(error) or 'Errno 16' in str(error)
+                    if not busy:
+                        break
+                    logger.info('transport busy, retry %d/10', attempt + 1)
+                    await asyncio.sleep(0.5)
+            if transport is None:
+                error = last_error or RuntimeError('unknown')
                 raise RuntimeError(
                     f'Dongle nicht erreichbar ({self.transport_name}): {error}. '
                     'Ist der Dongle eingesteckt und läuft die Auracaster-Firmware?'
@@ -653,6 +788,7 @@ class Engine:
             )
             device = bumble.device.Device.from_config_with_hci(config, hci_source, hci_sink)
             await device.power_on()
+            self.firmware = await read_auracaster_info(device.host)
             self.device = device
             emit('status', **self.status())
             return device
@@ -673,6 +809,7 @@ class Engine:
                     hci.LeFeatureMask.PERIODIC_ADVERTISING_SYNC_TRANSFER_SENDER
                 )
             ),
+            **self.firmware,
         }
 
     async def controller_details(self) -> dict[str, Any]:
@@ -943,14 +1080,18 @@ class Engine:
                 advertising_event_properties=bumble.device.AdvertisingEventProperties(
                     is_connectable=False
                 ),
-                primary_advertising_interval_min=100,
-                primary_advertising_interval_max=1000,
+                # 100-200 ms EA / 300-600 ms PA (v0.1.1: 62.5 / 125 ms): leaves more
+                # airtime for the BIG on the single nRF52840 radio
+                primary_advertising_interval_min=160,
+                primary_advertising_interval_max=320,
                 advertising_sid=0,
+                # maximum TX power (firmware: CONFIG_BT_CTLR_TX_PWR_PLUS_8)
+                advertising_tx_power=8,
             ),
             advertising_data=advertising_data,
             periodic_advertising_parameters=bumble.device.PeriodicAdvertisingParameters(
-                periodic_advertising_interval_min=100,
-                periodic_advertising_interval_max=1000,
+                periodic_advertising_interval_min=240,
+                periodic_advertising_interval_max=480,
             ),
             periodic_advertising_data=basic_audio_announcement.get_advertising_data(),
             auto_restart=True,
@@ -966,10 +1107,33 @@ class Engine:
                 max_sdu=frame_size,
                 max_transport_latency=preset.max_transport_latency_ms,
                 rtn=preset.rtn,
+                phy=hci.PhyBit.LE_2M,
+                packing=(
+                    bumble.device.BigParameters.Packing.INTERLEAVED
+                    if preset.packing == 'interleaved'
+                    else bumble.device.BigParameters.Packing.SEQUENTIAL
+                ),
                 broadcast_code=(
                     broadcast_code_bytes(broadcast.code) if broadcast.code else None
                 ),
             ),
+        )
+        big = self.big
+        self.big_info = {
+            'big_nse': getattr(big, 'nse', None),
+            'big_bn': getattr(big, 'bn', None),
+            'big_pto': getattr(big, 'pto', None),
+            'big_irc': getattr(big, 'irc', None),
+            'big_iso_interval_ms': getattr(big, 'iso_interval', None),
+            'big_transport_latency_us': getattr(big, 'transport_latency_big', None),
+            'big_packing': preset.packing,
+        }
+        logger.info('BIG parameters chosen by the controller: %s', self.big_info)
+        emit(
+            'log',
+            level='info',
+            message='BIG: NSE {big_nse}, BN {big_bn}, PTO {big_pto}, IRC {big_irc}, '
+            'ISO-Intervall {big_iso_interval_ms} ms, Packing {big_packing}'.format(**self.big_info),
         )
         bis_links = list(self.big.bis_links)
         for bis_link in bis_links:
@@ -1016,7 +1180,14 @@ class Engine:
             # ring: 250 ms max (overrun → drop oldest), jitter target ~30 ms
             ring.capacity = (pcm_rate // 4) * ring.bytes_per_frame
             target = pcm_rate * preset.jitter_target_ms // 1000
-            picker = FramePicker(ring, frame_samples, target)
+            picker = FramePicker(
+                ring,
+                frame_samples,
+                target,
+                channels=channels,
+                float_samples=pcm_format.sample_type != audio_io.PcmFormat.SampleType.INT16,
+                sample_rate=pcm_rate,
+            )
             logger.info(
                 'pipeline: PCM %d Hz %d ch %s -> LC3 %d Hz %.1f ms, %d bytes/BIS, '
                 'prefill %d SDUs, jitter target %d ms',
@@ -1065,6 +1236,9 @@ class Engine:
                 return data, (time.perf_counter() - t0) * 1000
 
             stats = PipelineStats()
+            stall_ms = 4 * preset.frame_duration_us / 1000
+            stalls = 0
+            last_stall_log = 0.0
             level_every = max(1, int(50000 / preset.frame_duration_us))  # ~20 Hz
             last_report = time.monotonic()
             completed0 = iso_queue.completed if iso_queue else 0
@@ -1072,10 +1246,27 @@ class Engine:
                 pcm = picker.next()
                 t_loop = time.perf_counter()
                 lc3_frame, encode_ms = await loop.run_in_executor(executor, encode, pcm)
+                t_radio = time.perf_counter()
                 for index, stream in enumerate(streams):
                     await stream.write(lc3_frame[index * frame_size : (index + 1) * frame_size])
+                radio_wait_ms = (time.perf_counter() - t_radio) * 1000
+                loop_ms = (time.perf_counter() - t_loop) * 1000
                 self.frames_sent += 1
-                stats.add(encode_ms, (time.perf_counter() - t_loop) * 1000)
+                stats.add(encode_ms, loop_ms)
+                stats.radio_wait_max = max(stats.radio_wait_max, radio_wait_ms)
+                if loop_ms > stall_ms:
+                    # who held us up: waiting for controller completions (radio) or
+                    # the host side (event loop, encoder thread, GC)?
+                    stalls += 1
+                    cause = 'Controller' if radio_wait_ms > loop_ms / 2 else 'Host'
+                    if time.monotonic() - last_stall_log > 2:
+                        last_stall_log = time.monotonic()
+                        message = (
+                            f'Stall {loop_ms:.0f} ms ({cause}: Funk-Warten {radio_wait_ms:.0f} ms, '
+                            f'Encoder {encode_ms:.1f} ms, im Controller {iso_queue.pending if iso_queue else "?"})'
+                        )
+                        logger.warning(message)
+                        emit('log', level='warning', message=message)
                 if self.frames_sent % level_every == 0 and pcm is not picker.silence:
                     peak, rms = measure_levels(pcm, pcm_format)
                     emit('level', peak=peak, rms=rms)
@@ -1096,6 +1287,10 @@ class Engine:
                         'overrun_frames': ring.dropped_frames,
                         'slips_dropped': picker.slips_dropped,
                         'slips_inserted': picker.slips_inserted,
+                        'flushes': picker.flushes,
+                        'flushed_frames': picker.flushed_frames,
+                        'stalls': stalls,
+                        'radio_wait_ms_max': round(stats.radio_wait_max, 1),
                         'buffer_ms': round(ring.frames * 1000 / pcm_rate, 1),
                         'encode_ms_avg': round(stats.encode_sum / max(1, stats.frames), 2),
                         'encode_ms_max': round(stats.encode_max, 2),
@@ -1104,6 +1299,11 @@ class Engine:
                             stats.frames * len(streams) * (frame_size + 9) / (now - last_report)
                         ),
                         'controller_resets': self.resets,
+                        # SDUs the radio should take per second (all BIS)
+                        'sdus_expected_per_s': round(
+                            len(streams) * 1_000_000 / preset.frame_duration_us, 1
+                        ),
+                        **{k: v for k, v in self.big_info.items() if v is not None},
                     }
                     self.last_stats = report
                     emit('stats', **report)

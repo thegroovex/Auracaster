@@ -148,6 +148,12 @@ actor BumbleEngineClient: BroadcastEngine {
                 try? await Task.sleep(for: .milliseconds(100))
             }
             if process.isRunning { process.terminate() }
+            // Wait for the exit so the serial port is free for the next helper
+            // (v0.1.1: "[Errno 16] Resource busy" on restart).
+            for _ in 0..<30 where process.isRunning {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
         }
         try? stdinHandle?.close()
         stdinHandle = nil

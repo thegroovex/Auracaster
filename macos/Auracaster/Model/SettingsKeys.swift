@@ -20,6 +20,12 @@ enum SettingsKeys {
     static let automaticUpdateChecks = "automaticUpdateChecks"
     static let lastUpdateCheck = "lastUpdateCheck"
     static let announcedUpdateVersion = "announcedUpdateVersion"
+    /// Jitter buffer in ms (30 / 60 / 100), see `StabilityBuffer`.
+    static let stabilityBufferMs = "stabilityBufferMs"
+    /// Send one mono BIS (L+R downmix) instead of two – half the airtime.
+    static let monoBroadcast = "monoBroadcast"
+    /// v0.1.2 moved the default preset to "Ausgewogen" once.
+    static let presetMigration012 = "presetMigration012"
 }
 
 enum EngineKind: String, CaseIterable, Identifiable, Sendable {

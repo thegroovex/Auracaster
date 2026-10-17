@@ -7,6 +7,7 @@ import IOKit
 enum DongleDetector {
     enum State: Equatable, Sendable {
         case dongle
+        case repeater
         case bootloader(volume: String)
         case serialPort(String)
         case none
@@ -14,6 +15,7 @@ enum DongleDetector {
         var title: String {
             switch self {
             case .dongle: "Auracaster Dongle erkannt"
+            case .repeater: "Auracaster Repeater erkannt"
             case .bootloader: "Bootloader-Laufwerk erkannt"
             case .serialPort: "Serielles USB-Gerät gefunden"
             case .none: "Kein Dongle gefunden"
@@ -24,6 +26,8 @@ enum DongleDetector {
             switch self {
             case .dongle:
                 "Die Auracaster-Firmware läuft. Du kannst senden."
+            case .repeater:
+                "Ein Repeater hängt am Mac. Zum Senden brauchst du zusätzlich einen Sender-Dongle."
             case .bootloader(let volume):
                 "„\(volume)“ ist eingebunden. Ziehe jetzt die passende .uf2-Datei darauf – der Dongle startet danach von selbst neu."
             case .serialPort(let port):
@@ -36,6 +40,7 @@ enum DongleDetector {
         var symbol: String {
             switch self {
             case .dongle: "checkmark.circle.fill"
+            case .repeater: "dot.radiowaves.right"
             case .bootloader: "externaldrive.fill.badge.plus"
             case .serialPort: "questionmark.circle.fill"
             case .none: "cable.connector.slash"
@@ -50,6 +55,7 @@ enum DongleDetector {
 
     static func detect() -> State {
         if usbDevicePresent(vendor: vendorID, product: productID) { return .dongle }
+        if usbDevicePresent(vendor: vendorID, product: BoardRole.repeater.usbProductID) { return .repeater }
         if let volume = bootloaderVolume() { return .bootloader(volume: volume) }
         if let port = serialPorts().first { return .serialPort(port) }
         return .none

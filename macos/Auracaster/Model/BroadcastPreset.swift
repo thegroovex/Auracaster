@@ -18,8 +18,9 @@ enum BroadcastPreset: String, CaseIterable, Identifiable, Codable, Sendable {
 
     var id: String { rawValue }
 
-    /// Default for new installations (works with the receivers tested so far).
-    static let `default`: BroadcastPreset = .highQuality
+    /// Default for new installations. v0.1.2: back to "Ausgewogen" – user test of
+    /// v0.1.1 showed "Hohe Qualität" (48_4, RTN 4) buffering while 48_2/24_2 played.
+    static let `default`: BroadcastPreset = .balanced
 
     var title: String {
         switch self {
@@ -33,8 +34,8 @@ enum BroadcastPreset: String, CaseIterable, Identifiable, Codable, Sendable {
     var detail: String {
         switch self {
         case .compatible: "24_2 · 24 kHz · 10 ms – läuft auf jedem Auracast-Empfänger"
-        case .balanced: "48_2 · 48 kHz · 10 ms · 25 ms Puffer"
-        case .highQuality: "48_4 · 48 kHz · 10 ms · 40 ms Puffer – empfohlen"
+        case .balanced: "48_2 · 48 kHz · 10 ms · 25 ms Puffer – empfohlen"
+        case .highQuality: "48_4 · 48 kHz · 10 ms · 40 ms Puffer – höchste Bitrate"
         case .ultraLow: "Experimentell: 7,5-ms-Frames, 10 ms Puffer – nicht jeder Empfänger spielt das ab"
         }
     }
@@ -82,7 +83,9 @@ enum BroadcastPreset: String, CaseIterable, Identifiable, Codable, Sendable {
         switch self {
         case .compatible: 2
         case .balanced: 2
-        case .highQuality: 4
+        // v0.1.1 used 4: 2 BIS × 5 transmissions × 120 B did not fit the
+        // nRF52840's airtime next to EA/PA (stalled completions, buffering).
+        case .highQuality: 2
         case .ultraLow: 2
         }
     }
@@ -92,9 +95,14 @@ enum BroadcastPreset: String, CaseIterable, Identifiable, Codable, Sendable {
         switch self {
         case .compatible: 10
         case .balanced: 20
-        case .highQuality: 65
+        case .highQuality: 20 // was 65 (ISO interval 50 ms, BN 5 – bursty)
         case .ultraLow: 10
         }
+    }
+
+    /// BIS packing in the BIG (interleaved spreads the subevents of both BIS).
+    var packing: String {
+        self == .highQuality ? "interleaved" : "sequential"
     }
 
     var frameDurationMilliseconds: Double { Double(frameDurationMicroseconds) / 1000 }
@@ -111,5 +119,27 @@ enum BroadcastPreset: String, CaseIterable, Identifiable, Codable, Sendable {
     var codecSummary: String {
         let frame = frameDurationMilliseconds.formatted(.number.precision(.fractionLength(0...1)))
         return "LC3 · \(sampleRate / 1000) kHz · \(frame) ms"
+    }
+}
+
+
+/// Jitter buffer between Mac capture and encoder ("Stabilität" in the settings).
+enum StabilityBuffer: Int, CaseIterable, Identifiable, Sendable {
+    case low = 30
+    case medium = 60
+    case high = 100
+
+    var id: Int { rawValue }
+
+    var title: String {
+        switch self {
+        case .low: "30 ms – geringe Latenz"
+        case .medium: "60 ms – stabiler"
+        case .high: "100 ms – maximal stabil"
+        }
+    }
+
+    static var current: StabilityBuffer {
+        StabilityBuffer(rawValue: UserDefaults.standard.integer(forKey: SettingsKeys.stabilityBufferMs)) ?? .low
     }
 }

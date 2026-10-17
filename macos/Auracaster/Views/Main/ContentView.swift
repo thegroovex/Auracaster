@@ -65,6 +65,7 @@ struct ContentView: View {
 
     var body: some View {
         @Bindable var updater = updater
+        @Bindable var dongleAssistant = DongleAssistant.shared
 
         NavigationSplitView(columnVisibility: $columnVisibility) {
             SidebarView(selection: $selection)
@@ -84,6 +85,10 @@ struct ContentView: View {
         .sheet(isPresented: $updater.isSheetPresented) {
             UpdateSheet()
                 .environment(updater)
+        }
+        .sheet(isPresented: $dongleAssistant.isSheetPresented) {
+            DongleAssistantView(style: .sheet)
+                .environment(model)
         }
         .onAppear {
             if !hasCompletedOnboarding && !ScreenshotMode.isActive { showOnboarding = true }

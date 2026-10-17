@@ -10,7 +10,6 @@ struct OnboardingView: View {
 
     @AppStorage(SettingsKeys.hasCompletedOnboarding) private var hasCompletedOnboarding = false
     @State private var step: Int
-    @State private var dongle: DongleDetector.State = .none
     @State private var audioPermission: AudioCapturePermission.Status = AudioCapturePermission.status
     @State private var microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)
     private var setup: EngineSetup { EngineSetup.shared }
@@ -25,7 +24,6 @@ struct OnboardingView: View {
     init(initialStep: Int = 0, isShowcase: Bool = false) {
         _step = State(initialValue: initialStep)
         self.isShowcase = isShowcase
-        if isShowcase { _dongle = State(initialValue: .dongle) }
     }
 
     var body: some View {
@@ -47,15 +45,8 @@ struct OnboardingView: View {
                                     removal: .opacity))
             footer
         }
-        .frame(width: 640, height: 540)
+        .frame(width: 680, height: 640)
         .animation(.smooth, value: step)
-        .task(id: step) {
-            guard !isShowcase, step == 1 else { return }
-            while !Task.isCancelled {
-                dongle = DongleDetector.detect()
-                try? await Task.sleep(for: .seconds(1.5))
-            }
-        }
     }
 
     // MARK: Chrome
@@ -134,38 +125,10 @@ struct OnboardingView: View {
     }
 
     private var dongleStep: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            stepHeader("cable.connector", "Dongle einstecken",
-                       "Der Mac kann Auracast nicht selbst senden. Ein kleiner USB-Dongle (Pro Micro nRF52840, ca. 5 €) übernimmt den Funk.")
-            HStack(spacing: 14) {
-                Image(systemName: dongle.symbol)
-                    .font(.system(size: 30))
-                    .foregroundStyle(dongle.isReady ? .green : (dongle == .none ? .secondary : .orange))
-                    .contentTransition(.symbolEffect(.replace))
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(dongle.title).font(.headline)
-                    Text(dongle.detail).font(.callout).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 0)
-                if !dongle.isReady && !isShowcase {
-                    ProgressView().controlSize(.small)
-                }
-            }
-            .padding(16)
-            .glassEffect(.regular, in: .rect(cornerRadius: 18))
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Neuer Dongle? So kommt die Firmware drauf:").font(.subheadline.weight(.semibold))
-                numbered(1, "Dongle anstecken und **zweimal schnell** Reset drücken (bzw. RST zweimal kurz an GND tippen).")
-                numbered(2, "Ein Laufwerk wie **NICENANO** erscheint. In `INFO_UF2.TXT` steht die SoftDevice-Version.")
-                numbered(3, "Passende `.uf2`-Datei aus dem Release auf das Laufwerk ziehen – fertig.")
-            }
-            HStack {
-                Button("Firmware laden") { openURL(Self.firmwareURL) }
-                Button("Bebilderte Anleitung") { openURL(Self.flashGuideURL) }
-            }
-            .buttonStyle(.glass)
+        VStack(alignment: .leading, spacing: 12) {
+            stepHeader("cable.connector", "Dongle einrichten",
+                       "Der Mac kann Auracast nicht selbst senden. Ein Pro-Micro-nRF52840-Board (ca. 5 €) übernimmt den Funk – einfach anstecken, die App installiert die Firmware selbst.")
+            DongleAssistantView(style: .embedded, isShowcase: isShowcase, autoWatch: true)
         }
     }
 

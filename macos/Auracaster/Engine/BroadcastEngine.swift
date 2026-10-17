@@ -47,6 +47,8 @@ struct EngineStatus: Sendable, Equatable {
     var uptimeSeconds: Double
     var broadcastID: Int?
     var errorMessage: String?
+    /// Firmware identity reported by the helper (HCI vendor command 0xFF50, firmware ≥ 0.1.2).
+    var firmware: InstalledFirmware? = nil
 
     static let notLaunched = EngineStatus(
         state: .notLaunched, transport: nil, controllerConnected: false,
@@ -100,6 +102,30 @@ struct EngineStats: Sendable, Equatable {
     var serialBytesPerSecond: Int
     var controllerResets: Int
     var framesSent: Int
+    /// SDUs per second the BIG should take (all BIS); confirmed < expected = backlog.
+    var expectedPerSecond: Double = 0
+    var bigInfo: String? = nil
+    /// Jitter buffer jumped back to its target after a backlog (v0.1.2).
+    var flushes: Int = 0
+    /// Loop iterations > 4 frame durations, and the longest wait for the radio.
+    var stalls: Int = 0
+    var radioWaitMillisecondsMax: Double = 0
+
+    /// Confirmed ÷ expected (1.0 = the radio keeps up).
+    var radioRatio: Double? {
+        expectedPerSecond > 0 ? completedPerSecond / expectedPerSecond : nil
+    }
+}
+
+/// Mac capture → FIFO counters (measured in the app).
+struct CaptureStats: Sendable, Equatable {
+    var framesPerSecond: Double
+    var sampleRate: Int
+    var fifoDroppedPerSecond: Double
+    var fifoDroppedTotal: Int
+
+    /// Captured ÷ nominal sample rate (1.0 = Core Audio delivers in real time).
+    var rateRatio: Double { sampleRate > 0 ? framesPerSecond / Double(sampleRate) : 0 }
 }
 
 /// Result of "Dongle prüfen" (helper `controller_info`).
@@ -126,6 +152,8 @@ struct ControllerInfo: Sendable, Equatable {
     var serialPorts: [SerialPort]
     var helperVersion: String?
     var error: String?
+    /// e.g. "0.1.2 · dongle · s140v6" or "0.1.1 oder älter"
+    var firmware: String? = nil
 }
 
 enum EngineEvent: Sendable {

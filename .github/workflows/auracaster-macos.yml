@@ -13,8 +13,10 @@ on:
       - 'macos/**'
       - 'engine/**'
       - 'bumble/**'
+      - 'firmware/**'        # the app bundles the UF2 files
       - 'pyproject.toml'
       - '.github/workflows/auracaster-macos.yml'
+      - '.github/workflows/firmware.yml'
       - '!**/*.md'           # docs-only changes skip the build
   pull_request:
     types: [ opened, synchronize, reopened, labeled ]
@@ -49,7 +51,7 @@ jobs:
           python-version: '3.12'
       - name: Syntax
         run: |
-          python -m py_compile engine/auracaster_helper.py engine/tests/test_pipeline.py
+          python -m py_compile engine/auracaster_helper.py engine/tests/test_pipeline.py engine/tests/test_firmware_info.py
           bash -n engine/setup-engine.sh macos/Installer/install.sh macos/Installer/Gatekeeper-Fix.command
       - name: pip install . into a fresh venv (what setup-engine.sh does)
         run: |
@@ -61,11 +63,18 @@ jobs:
           /tmp/engine/bin/python -c "import bumble.device, bumble.profiles.bap, bumble.crypto, bumble.audio.io; import lc3; print('imports ok')"
           /tmp/engine/bin/python /tmp/auracaster_helper.py --help > /dev/null
           /tmp/engine/bin/python /tmp/auracaster_helper.py --self-test
-      - name: Audio pipeline tests (jitter buffer, LC3 round trip, controller-paced loop)
+      - name: Audio pipeline tests (jitter buffer, stall flush, LC3 round trip, controller-paced loop)
         run: /tmp/engine/bin/python engine/tests/test_pipeline.py
+      - name: Firmware identity tests (HCI vendor command 0xFF50)
+        run: /tmp/engine/bin/python engine/tests/test_firmware_info.py
+
+  firmware:
+    name: Dongle + repeater firmware (bundled into the app)
+    uses: ./.github/workflows/firmware.yml
 
   build:
     name: Build Auracaster.app (Xcode 26+)
+    needs: firmware
     runs-on: macos-26
     timeout-minutes: 50
     outputs:
@@ -110,8 +119,38 @@ jobs:
           fi
           echo "$HOME/xcodegen/bin" >> "$GITHUB_PATH"
 
+      - name: Firmware for the app bundle (dongle assistant, offline install)
+        uses: actions/download-artifact@v4
+        with:
+          name: auracaster-dongle-uf2
+          path: /tmp/fw
+
+      - name: Stage bundled firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          dest=macos/BundledFirmware/Firmware
+          cp /tmp/fw/*.uf2 /tmp/fw/SHA256SUMS.txt /tmp/fw/firmware-manifest.json "$dest/"
+          (cd "$dest" && shasum -a 256 -c SHA256SUMS.txt)
+          python3 -c "import json;m=json.load(open('$dest/firmware-manifest.json'));print('bundled firmware', m['versions'], len(m['files']), 'files')"
+
       - name: Generate Xcode project
         run: cd macos && xcodegen generate
+
+      - name: Unit tests (INFO_UF2 parser, variants, versions, UF2, HCI, serial DFU, capture plan)
+        shell: bash
+        run: |
+          set -o pipefail
+          cd macos
+          xcodebuild test -project Auracaster.xcodeproj -scheme AuracasterTests -destination 'platform=macOS' \
+            -derivedDataPath build-tests COMPILER_INDEX_STORE_ENABLE=NO 2>&1 | tee test.log | grep -E 'Test Case|error:|failed|passed|Executed' || true
+          grep -q '\*\* TEST SUCCEEDED \*\*' test.log || {
+            grep -E 'error:|failed' test.log | sort -u | head -n 40 | while IFS= read -r line; do
+              echo "::error title=unit tests::${line#$GITHUB_WORKSPACE/}"
+            done
+            tail -n 40 test.log
+            exit 1
+          }
 
       - name: Build (Release, unsigned)
         shell: bash
@@ -143,7 +182,7 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$APP"
           codesign -d -r- "$APP" 2>&1 | tail -n 2
           /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist"
-          ls "$APP/Contents/Resources"
+          ls "$APP/Contents/Resources" "$APP/Contents/Resources/Firmware"
 
       - name: Screenshots (screenshot mode, light + dark)
         if: env.DO_PACKAGE == 'true'
@@ -263,11 +302,6 @@ jobs:
           path: macos/build.log
           retention-days: 7
 
-  firmware:
-    name: Dongle firmware (release only)
-    if: startsWith(github.ref, 'refs/tags/v')
-    uses: ./.github/workflows/firmware.yml
-
   release:
     name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
@@ -291,7 +325,7 @@ jobs:
           set -euo pipefail
           V="${{ needs.build.outputs.version }}"
           (cd fw && zip -q -r ../dist/Auracaster-Dongle-Firmware-$V.zip .)
-          cp fw/*.uf2 dist/
+          cp fw/*.uf2 fw/SHA256SUMS.txt fw/firmware-manifest.json dist/
           ls -l dist
           {
             echo "## Auracaster $V"
@@ -308,6 +342,7 @@ jobs:
             echo "| auracaster-dongle-s140v7-0x27000.uf2 | Firmware für \`SoftDevice: S140 version 7.x\` |"
             echo "| auracaster-dongle-nosd-0x1000.uf2 | Firmware für \`SoftDevice: not found\` |"
             echo "| auracaster-repeater-*.uf2 | *Optional:* eigenständiger Auracast-Repeater (nur USB-Strom), siehe firmware/repeater/README.md |"
+            echo "| SHA256SUMS.txt, firmware-manifest.json | Prüfsummen/Versionen – nutzt der Dongle-Assistent der App |"
             echo "| Auracaster-Dongle-Firmware-$V.zip | Alle Firmware-Dateien + BUILDINFO |"
             echo
             echo "### Ohne Gatekeeper-Warnung installieren (Terminal)"
@@ -332,6 +367,8 @@ jobs:
             dist/Auracaster-macOS.zip
             dist/Auracaster-Dongle-Firmware-*.zip
             dist/*.uf2
+            dist/SHA256SUMS.txt
+            dist/firmware-manifest.json
 
   result:
     name: CI result

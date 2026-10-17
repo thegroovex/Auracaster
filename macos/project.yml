@@ -26,11 +26,16 @@ targets:
       # One-click engine setup (uv → Python 3.12 venv → Bumble + LC3), run by the app.
       - path: ../engine/setup-engine.sh
         buildPhase: resources
+      # Dongle/repeater UF2 files for the dongle assistant (offline install).
+      # CI fills BundledFirmware/Firmware before the build; copied as Resources/Firmware.
+      - path: BundledFirmware/Firmware
+        type: folder
+        buildPhase: resources
     settings:
       base:
         PRODUCT_NAME: Auracaster
         PRODUCT_BUNDLE_IDENTIFIER: de.groovex.Auracaster
-        MARKETING_VERSION: "0.1.1"
+        MARKETING_VERSION: "0.1.2"
         CURRENT_PROJECT_VERSION: "1"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
@@ -52,6 +57,7 @@ targets:
         NSHumanReadableCopyright: "© 2026 Groove X. Bumble © Google LLC (Apache-2.0)."
         NSAudioCaptureUsageDescription: Auracaster nimmt das Systemaudio bzw. einzelne Apps auf, um es als Auracast-Broadcast zu senden.
         NSMicrophoneUsageDescription: Auracaster kann Mikrofone und Audio-Interfaces als Quelle für den Broadcast verwenden.
+        NSRemovableVolumesUsageDescription: Der Dongle-Assistent schreibt die Auracaster-Firmware auf das Bootloader-Laufwerk des Boards (z. B. NICENANO).
     entitlements:
       path: Auracaster/Auracaster.entitlements
       properties:
@@ -60,7 +66,32 @@ targets:
         com.apple.security.app-sandbox: false
         com.apple.security.device.audio-input: true
         com.apple.security.device.usb: true
+  # Unit tests of the pure logic (dongle assistant, versions, capture plan).
+  # The sources are compiled into the bundle directly: no host app.
+  AuracasterTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: AuracasterTests
+      - path: Auracaster/Firmware/FirmwareCore.swift
+      - path: Auracaster/Update/UpdateService.swift
+      - path: Auracaster/Audio/CapturePlan.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.groovex.AuracasterTests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        ENABLE_HARDENED_RUNTIME: NO
 schemes:
+  AuracasterTests:
+    build:
+      targets:
+        AuracasterTests: [test]
+    test:
+      targets:
+        - AuracasterTests
   Auracaster:
     build:
       targets:

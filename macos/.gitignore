@@ -7,3 +7,8 @@ xcuserdata/
 DerivedData/
 build/
 *.xcworkspace/xcuserdata/
+
+# filled by CI (dongle assistant offline firmware)
+BundledFirmware/Firmware/*.uf2
+BundledFirmware/Firmware/*.json
+BundledFirmware/Firmware/SHA256SUMS.txt

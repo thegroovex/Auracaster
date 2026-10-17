@@ -16,6 +16,9 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.language) private var language = "deu"
     @AppStorage(SettingsKeys.isPublic) private var isPublic = true
     @AppStorage(SettingsKeys.showMenuBarExtra) private var showMenuBarExtra = true
+    @AppStorage(SettingsKeys.stabilityBufferMs) private var stabilityBufferMs = StabilityBuffer.low.rawValue
+    @AppStorage(SettingsKeys.monoBroadcast) private var monoBroadcast = false
+    @State private var showDongleAssistant = false
 
     var body: some View {
         Form {
@@ -42,6 +45,33 @@ struct SettingsView: View {
                 TextField("Helper-Skript", text: $helperOverridePath, prompt: Text("aus dem App-Bundle"))
                 Button("Engine neu starten") { Task { await model.restartEngine() } }
                     .help("Übernimmt geänderte Pfade/Transport ohne App-Neustart")
+            }
+
+            Section("Dongle & Repeater") {
+                LabeledContent("Sender-Dongle") {
+                    Text(dongleText).foregroundStyle(.secondary)
+                }
+                if let update = DongleAssistant.shared.dongleUpdate {
+                    Label("Firmware-Update \(update.description) verfügbar", systemImage: "arrow.down.circle.fill")
+                        .foregroundStyle(Color.accentColor)
+                }
+                if let status = DongleAssistant.shared.repeaterStatus,
+                   DongleAssistant.shared.boards.contains(where: { $0.role == .repeater }) {
+                    RepeaterStatusView(status: status)
+                }
+                Button("Dongle-Assistent öffnen …") { showDongleAssistant = true }
+                    .help("Firmware installieren oder aktualisieren, neue Boards einrichten, Repeater flashen")
+            }
+
+            Section("Übertragung") {
+                Picker("Stabilität (Puffer)", selection: $stabilityBufferMs) {
+                    ForEach(StabilityBuffer.allCases) { buffer in
+                        Text(buffer.title).tag(buffer.rawValue)
+                    }
+                }
+                .help("Puffer zwischen Mac-Aufnahme und Funk. Mehr Puffer = weniger Aussetzer, aber mehr Verzögerung. Wirkt beim nächsten Senden.")
+                Toggle("Mono senden (halbe Funklast)", isOn: $monoBroadcast)
+                    .help("L+R werden gemischt und als ein Kanal (1 BIS) gesendet – hilft, wenn „Hohe Qualität“ stottert oder ein Repeater mitläuft.")
             }
 
             Section("Broadcast") {
@@ -108,8 +138,8 @@ struct SettingsView: View {
                 if let info = model.controllerInfo {
                     ControllerInfoView(info: info)
                 }
-                if let stats = model.stats {
-                    StatsView(stats: stats)
+                if model.stats != nil || model.captureStats != nil {
+                    StatsView(stats: model.stats, capture: model.captureStats)
                 }
                 Toggle("WAV-Mitschnitt vor dem Encoder (Logs-Ordner)", isOn: $recordEncoderInput)
                     .help("Schreibt beim nächsten Senden ~/Library/Logs/Auracaster/encoder-input-….wav – so lässt sich Aufnahme vs. Funk trennen.")
@@ -134,6 +164,28 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .sheet(isPresented: $showDongleAssistant) {
+            DongleAssistantView(style: .sheet)
+                .environment(model)
+        }
+        .onAppear {
+            DongleAssistant.shared.model = model
+            DongleAssistant.shared.startMonitoring()
+        }
+        .onDisappear { DongleAssistant.shared.stopMonitoring() }
+    }
+
+    private var dongleText: String {
+        if let firmware = model.dongleFirmware {
+            if case .auracaster(let info) = firmware {
+                return "Firmware \(info.version) · \(info.variant?.rawValue ?? "?")"
+            }
+            return "Firmware \(firmware.versionText)"
+        }
+        if let board = DongleAssistant.shared.boards.first(where: { $0.role == .dongle }) {
+            return "Firmware \(board.firmware?.versionText ?? "wird geprüft …")"
+        }
+        return "nicht angeschlossen"
     }
 }
 
@@ -178,24 +230,60 @@ struct ControllerInfoView: View {
     }
 }
 
-/// Audio pipeline counters (1 Hz from the helper while live).
+/// Audio pipeline counters (1 Hz while live): capture (app) → FIFO → ring → encoder → radio (helper).
 struct StatsView: View {
-    var stats: EngineStats
+    var stats: EngineStats?
+    var capture: CaptureStats?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Audio-Pipeline").font(.subheadline.weight(.semibold))
+            if let capture {
+                LabeledContent("Aufnahme (Mac)", value: String(format: "%.0f Frames/s · %.0f %%", capture.framesPerSecond, capture.rateRatio * 100))
+                LabeledContent("FIFO verworfen", value: String(format: "%.0f/s · gesamt %d", capture.fifoDroppedPerSecond, capture.fifoDroppedTotal))
+            }
+            if let stats {
+                details(stats)
+            }
+        }
+        .font(.callout)
+        .monospacedDigit()
+    }
+
+    @ViewBuilder
+    private func details(_ stats: EngineStats) -> some View {
+        if let ratio = stats.radioRatio {
+            LabeledContent("Bestätigt / Soll") {
+                Text(String(format: "%.0f %% (%.0f / %.0f SDUs/s)", ratio * 100, stats.completedPerSecond, stats.expectedPerSecond))
+                    .foregroundStyle(ratio < 0.95 ? Color.orange : Color.primary)
+            }
+            if ratio < 0.95 {
+                Label("Dongle schafft dieses Preset nicht – er bestätigt weniger Pakete, als der Broadcast braucht. „Ausgewogen“ oder „Mono senden“ wählen.",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            LabeledContent("Stalls · Puffer-Sprünge", value: "\(stats.stalls) · \(stats.flushes)")
+            LabeledContent("Max. Warten auf Funk", value: String(format: "%.0f ms", stats.radioWaitMillisecondsMax))
+        }
+        if let big = stats.bigInfo {
+            LabeledContent("BIG (vom Controller gewählt)", value: big)
+        }
+        legacy(stats)
+    }
+
+    @ViewBuilder
+    private func legacy(_ stats: EngineStats) -> some View {
+        Group {
             LabeledContent("SDUs/s gesendet · bestätigt",
                            value: String(format: "%.0f · %.0f", stats.sdusPerSecond, stats.completedPerSecond))
             LabeledContent("Im Controller wartend", value: stats.pending.map(String.init) ?? "–")
-            LabeledContent("Puffer", value: String(format: "%.1f ms", stats.bufferMilliseconds))
+            LabeledContent("Ring-Füllstand (Jitter-Puffer)", value: String(format: "%.1f ms", stats.bufferMilliseconds))
             LabeledContent("Unterläufe · Überlauf-Frames", value: "\(stats.underruns) · \(stats.overrunFrames)")
             LabeledContent("Drift-Korrektur (−/+ Samples)", value: "\(stats.slipsDropped) / \(stats.slipsInserted)")
             LabeledContent("Encode Ø / max", value: String(format: "%.2f / %.2f ms", stats.encodeMillisecondsAverage, stats.encodeMillisecondsMax))
             LabeledContent("USB-Durchsatz", value: "\(stats.serialBytesPerSecond / 1024) KB/s")
             LabeledContent("Controller-Resets", value: "\(stats.controllerResets)")
         }
-        .font(.callout)
-        .monospacedDigit()
     }
 }

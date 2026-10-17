@@ -35,6 +35,13 @@ final class ProcessTapCapture: AudioCapture {
         return text
     }
 
+    /// What the last `prepare` tapped (diagnostics).
+    private(set) var lastPlan: TapPlan?
+    /// Channels of the tap stream (the aggregate may list the clock device's inputs first).
+    private var tapChannels: UInt32 = 2
+    /// Reused per IO cycle: only the tap's buffers (no allocation on the RT thread).
+    private let tapBuffers = TapBufferBox()
+
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
     /// Device the IOProc runs on (aggregate for taps, hardware for inputs).
@@ -42,7 +49,37 @@ final class ProcessTapCapture: AudioCapture {
     private var ioProcID: AudioDeviceIOProcID?
     private let ioQueue = DispatchQueue(label: "de.groovex.auracaster.capture", qos: .userInteractive)
 
-    deinit { stop() }
+    deinit {
+        stop()
+    }
+
+    /// Default output device with transport type and (for aggregates) sub-devices.
+    static func defaultOutputInfo() -> CapturePlanner.DeviceInfo? {
+        guard let device = try? CoreAudioHelpers.defaultOutputDevice(),
+              let uid = try? CoreAudioHelpers.string(device, kAudioDevicePropertyDeviceUID)
+        else { return nil }
+        let name = (try? CoreAudioHelpers.string(device, kAudioObjectPropertyName)) ?? uid
+        let transport = (try? CoreAudioHelpers.value(device, kAudioDevicePropertyTransportType, initial: UInt32(0))) ?? 0
+        var subDevices: [String] = []
+        if transport == kAudioDeviceTransportTypeAggregate {
+            if let main = try? CoreAudioHelpers.string(device, kAudioAggregateDevicePropertyMainSubDevice), !main.isEmpty {
+                subDevices.append(main)
+            }
+            var addr = CoreAudioHelpers.address(kAudioAggregateDevicePropertyFullSubDeviceList)
+            var list: Unmanaged<CFArray>?
+            var size = UInt32(MemoryLayout<Unmanaged<CFArray>?>.size)
+            if AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &list) == noErr,
+               let uids = list?.takeRetainedValue() as? [String] {
+                for sub in uids where !subDevices.contains(sub) { subDevices.append(sub) }
+            }
+        }
+        return CapturePlanner.DeviceInfo(uid: uid, name: name, transportType: fourCC(transport), subDeviceUIDs: subDevices)
+    }
+
+    private static func fourCC(_ value: UInt32) -> String {
+        let bytes = [24, 16, 8, 0].map { UInt8((value >> UInt32($0)) & 0xFF) }
+        return String(decoding: bytes, as: UTF8.self)
+    }
 
     @discardableResult
     func prepare(target: CaptureTarget) throws -> AudioStreamBasicDescription {
@@ -50,8 +87,26 @@ final class ProcessTapCapture: AudioCapture {
         do {
             switch target {
             case .systemAudio(let excludedPIDs):
-                let excluded = excludedPIDs.compactMap { try? CoreAudioHelpers.processObject(for: $0) }
-                try createTap(CATapDescription(stereoGlobalTapButExcludeProcesses: excluded))
+                // ONE global tap on the default output device – never combined with
+                // per-app taps (v0.1.1 echo bug), virtual-driver helpers excluded.
+                let output = Self.defaultOutputInfo()
+                let processes = CoreAudioHelpers.processObjects().compactMap { object -> CapturePlanner.TapProcess? in
+                    guard let pid = CoreAudioHelpers.pid(ofProcessObject: object) else { return nil }
+                    return CapturePlanner.TapProcess(pid: pid, bundleID: CoreAudioHelpers.bundleID(ofProcessObject: object),
+                                                      path: AppProcessResolver.executablePath(of: pid))
+                }
+                let plan = CapturePlanner.systemAudio(
+                    ownPID: ProcessInfo.processInfo.processIdentifier, extraExcluded: excludedPIDs,
+                    processes: processes, defaultOutput: output
+                )
+                lastPlan = plan
+                let excluded = plan.excludedPIDs.compactMap { try? CoreAudioHelpers.processObject(for: $0) }
+                let description = CATapDescription(stereoGlobalTapButExcludeProcesses: excluded)
+                if let uid = plan.deviceUID {
+                    description.deviceUID = uid
+                    description.stream = plan.stream.map { NSNumber(value: $0) }
+                }
+                try createTap(description, clockOutput: output)
             case .applications(let pids):
                 // Main process + helpers (WebKit GPU/WebContent, "… Helper", XPC).
                 var processes: [AudioObjectID] = []
@@ -64,7 +119,8 @@ final class ProcessTapCapture: AudioCapture {
                     let name = pids.first.flatMap { NSRunningApplication(processIdentifier: $0)?.localizedName }
                     throw AudioCaptureError.appNotPlaying(name ?? "Die App")
                 }
-                try createTap(CATapDescription(stereoMixdownOfProcesses: processes))
+                lastPlan = TapPlan(kind: .processes(pids), excludedPIDs: [], deviceUID: nil, stream: nil)
+                try createTap(CATapDescription(stereoMixdownOfProcesses: processes), clockOutput: Self.defaultOutputInfo())
             case .inputDevice(let uid):
                 guard let device = CoreAudioHelpers.device(withUID: uid) else {
                     throw AudioCaptureError.unsupportedTarget
@@ -113,7 +169,7 @@ final class ProcessTapCapture: AudioCapture {
 
     // MARK: Private
 
-    private func createTap(_ description: CATapDescription) throws {
+    private func createTap(_ description: CATapDescription, clockOutput: CapturePlanner.DeviceInfo?) throws {
         description.name = "Auracaster"
         description.uuid = UUID()
         description.isPrivate = true
@@ -127,17 +183,22 @@ final class ProcessTapCapture: AudioCapture {
             tap, kAudioTapPropertyFormat, initial: AudioStreamBasicDescription()
         )
 
+        tapChannels = max(1, streamFormat?.mChannelsPerFrame ?? 2)
+
         // Clock source of the aggregate: the DEFAULT output device (what the user
         // hears), not the "system/alert sound" device, which may be a virtual
         // driver (Pro Tools Audio Bridge, AirBeamTV, …) with its own clock.
-        let outputDevice: AudioDeviceID
-        if let device = try? CoreAudioHelpers.defaultOutputDevice() {
-            outputDevice = device
+        // A multi-output/aggregate default device contributes its main sub-device
+        // (aggregates cannot be nested).
+        let outputUID: String
+        if let clockOutput {
+            outputUID = CapturePlanner.clockDeviceUID(defaultOutput: clockOutput)
+            outputDeviceName = clockOutput.name
         } else {
-            outputDevice = try CoreAudioHelpers.defaultSystemOutputDevice()
+            let device = try CoreAudioHelpers.defaultSystemOutputDevice()
+            outputUID = try CoreAudioHelpers.string(device, kAudioDevicePropertyDeviceUID)
+            outputDeviceName = (try? CoreAudioHelpers.string(device, kAudioObjectPropertyName)) ?? outputUID
         }
-        let outputUID = try CoreAudioHelpers.string(outputDevice, kAudioDevicePropertyDeviceUID)
-        outputDeviceName = (try? CoreAudioHelpers.string(outputDevice, kAudioObjectPropertyName)) ?? outputUID
 
         let aggregate: [String: Any] = [
             kAudioAggregateDeviceNameKey: "Auracaster Tap",
@@ -163,13 +224,11 @@ final class ProcessTapCapture: AudioCapture {
         aggregateID = device
         ioDeviceID = device
 
-        // The IOProc delivers the aggregate's input stream format; prefer it over
-        // the tap description when they differ (sample rate follows the clock device).
-        if let aggregateFormat = try? CoreAudioHelpers.value(
-            device, kAudioDevicePropertyStreamFormat,
-            scope: kAudioObjectPropertyScopeInput, initial: AudioStreamBasicDescription()
-        ), aggregateFormat.mSampleRate > 0, aggregateFormat.mBytesPerFrame > 0 {
-            streamFormat = aggregateFormat
+        // Keep the TAP's format (the aggregate's first input stream may be the
+        // clock device's own input); only the sample rate follows the clock device.
+        if let rate = try? CoreAudioHelpers.value(device, kAudioDevicePropertyNominalSampleRate, initial: Float64(0)),
+           rate > 0 {
+            streamFormat?.mSampleRate = rate
         }
     }
 
@@ -178,14 +237,29 @@ final class ProcessTapCapture: AudioCapture {
             throw AudioCaptureError.coreAudio("Stream format", -1)
         }
         let bytesPerFrame = Int(format.mBytesPerFrame)
+        let isTap = aggregateID != AudioObjectID(kAudioObjectUnknown)
+        let nonInterleaved = (format.mFormatFlags & AudioFormatFlags(kAudioFormatFlagIsNonInterleaved)) != 0
+        let tapBuffers = nonInterleaved ? Int(tapChannels) : 1
+        let selected = tapBuffers
 
         var procID: AudioDeviceIOProcID?
         try checkCA(
             AudioDeviceCreateIOProcIDWithBlock(&procID, ioDeviceID, ioQueue) { _, inputData, _, _, _ in
                 // Real-time thread: hand the buffer straight to the consumer.
-                let frames = Int(inputData.pointee.mBuffers.mDataByteSize) / bytesPerFrame
+                let all = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
+                guard all.count > 0 else { return }
+                var list: UnsafePointer<AudioBufferList> = inputData
+                if isTap && all.count > tapBuffers {
+                    // Only the tap's buffers – never the clock device's own input.
+                    let range = CapturePlanner.tapBufferRange(totalBuffers: all.count, tapBuffers: tapBuffers)
+                    let target = selected.list
+                    target.unsafeMutablePointer.pointee.mNumberBuffers = UInt32(min(range.count, 2))
+                    for (slot, index) in range.prefix(2).enumerated() { target[slot] = all[index] }
+                    list = UnsafePointer(target.unsafeMutablePointer)
+                }
+                let frames = Int(list.pointee.mBuffers.mDataByteSize) / bytesPerFrame
                 guard frames > 0 else { return }
-                handler(inputData, frames, format)
+                handler(list, frames, format)
             },
             "AudioDeviceCreateIOProcIDWithBlock"
         )
@@ -193,4 +267,11 @@ final class ProcessTapCapture: AudioCapture {
         try checkCA(AudioDeviceStart(ioDeviceID, procID), "AudioDeviceStart")
         isRunning = true
     }
+}
+
+/// Two-buffer AudioBufferList reused on the IO thread (only the tap's buffers).
+private final class TapBufferBox: @unchecked Sendable {
+    let list = AudioBufferList.allocate(maximumBuffers: 2)
+
+    deinit { free(list.unsafeMutablePointer) }
 }

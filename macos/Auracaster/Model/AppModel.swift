@@ -53,10 +53,14 @@ final class AppModel {
     private(set) var helperVersion: String?
     private(set) var logLines: [String] = []
     private(set) var stats: EngineStats?
+    /// Capture side of the pipeline (Mac → FIFO), 1 Hz while live.
+    private(set) var captureStats: CaptureStats?
     private(set) var controllerInfo: ControllerInfo?
     private(set) var isCheckingDongle = false
     private(set) var dongleDetection: DongleDetector.State = .none
     private(set) var captureFormat: String?
+    /// Dongle assistant flashes a board: engine stopped, no auto-connect.
+    private(set) var firmwareMaintenance = false
     var lastError: String?
     var lastErrorAction: ErrorAction = .none
 
@@ -71,6 +75,7 @@ final class AppModel {
     @ObservationIgnored private var startTask: Task<Void, Never>?
     @ObservationIgnored private var detectionTask: Task<Void, Never>?
     @ObservationIgnored private var capture: ProcessTapCapture?
+    @ObservationIgnored private var meterTask: Task<Void, Never>?
     @ObservationIgnored private var pcmTransport: FifoPCMTransport?
     @ObservationIgnored private var expectingTermination = false
     private let isPreview: Bool
@@ -101,6 +106,14 @@ final class AppModel {
             self.engineKind = kind
             self.engine = Self.makeEngine(kind)
             self.isPreview = false
+        }
+        // v0.1.2: "Hohe Qualität" was the v0.1.1 default and buffered on real hardware →
+        // move existing installations to "Ausgewogen" once.
+        if !defaults.bool(forKey: SettingsKeys.presetMigration012) {
+            defaults.set(true, forKey: SettingsKeys.presetMigration012)
+            if defaults.string(forKey: SettingsKeys.preset) == BroadcastPreset.highQuality.rawValue {
+                defaults.set(BroadcastPreset.balanced.rawValue, forKey: SettingsKeys.preset)
+            }
         }
         if let stored = defaults.string(forKey: SettingsKeys.preset), let saved = BroadcastPreset(rawValue: stored) {
             preset = saved
@@ -153,7 +166,9 @@ final class AppModel {
         if engineStatus.controllerConnected { return .connected(address: engineStatus.controllerAddress) }
         switch dongleDetection {
         case .dongle, .serialPort:
-            return .detected
+            return firmwareMaintenance ? .error("Firmware wird installiert …") : .detected
+        case .repeater:
+            return .error("Nur ein Repeater angeschlossen – zum Senden fehlt der Sender-Dongle")
         case .bootloader:
             return .error("Bootloader-Laufwerk – Firmware noch nicht geflasht")
         case .none:
@@ -205,6 +220,36 @@ final class AppModel {
         await switchEngine(to: engineKind)
     }
 
+    // MARK: Firmware maintenance (dongle assistant)
+
+    /// Stops broadcasting and quits the helper so the assistant owns the
+    /// serial port; blocks the automatic reconnect until `resumeEngineAfterFirmware`.
+    func suspendEngineForFirmware() async {
+        guard !firmwareMaintenance else { return }
+        firmwareMaintenance = true
+        appendLog("Dongle-Assistent: Engine getrennt")
+        await stopBroadcast()
+        expectingTermination = true
+        await engine.shutdown()
+        engineStatus = .notLaunched
+        stats = nil
+        levels = .silent
+    }
+
+    func resumeEngineAfterFirmware() async {
+        guard firmwareMaintenance else { return }
+        firmwareMaintenance = false
+        appendLog("Dongle-Assistent: Engine wird wieder verbunden")
+        await switchEngine(to: engineKind)
+    }
+
+    func appendFirmwareLog(_ line: String) {
+        appendLog("Dongle-Assistent: \(line)")
+    }
+
+    /// Firmware on the connected dongle as reported by the helper.
+    var dongleFirmware: InstalledFirmware? { engineStatus.firmware }
+
     private func connectEngine() async {
         do {
             try await engine.connect()
@@ -230,6 +275,10 @@ final class AppModel {
 
     func startBroadcast() async {
         guard !isTransitioning else { return }
+        guard !firmwareMaintenance else {
+            showError("Der Dongle-Assistent installiert gerade Firmware. Bitte warten, bis er fertig ist.")
+            return
+        }
         isTransitioning = true
         defer { isTransitioning = false }
         clearError()
@@ -261,10 +310,17 @@ final class AppModel {
                 captureFormat = capture.formatDescription
                 appendLog("Quelle „\(source.name)“: \(capture.formatDescription)")
                 // 2. FIFO passend zum Format anlegen.
+                let sourceChannels = min(2, max(1, Int(format.mChannelsPerFrame)))
+                let mono = defaults.bool(forKey: SettingsKeys.monoBroadcast) && sourceChannels == 2
                 let transport = try FifoPCMTransport(
                     sampleRate: Int(format.mSampleRate),
-                    channels: min(2, max(1, Int(format.mChannelsPerFrame)))
+                    channels: mono ? 1 : sourceChannels,
+                    downmixToMono: mono
                 )
+                if mono { appendLog("Mono-Broadcast: L+R → 1 BIS") }
+                if let plan = capture.lastPlan {
+                    appendLog("Tap: \(plan.kind == .global ? "global (Systemaudio)" : "App-Prozesse"), Gerät \(plan.deviceUID ?? "alle"), ausgeschlossen: \(plan.excludedPIDs.count) Prozess(e)")
+                }
                 transport.gain = Float(volume)
                 request.audioInput = transport.helperInputSpec
                 request.audioFormat = transport.helperFormatSpec
@@ -277,6 +333,7 @@ final class AppModel {
                 try capture.start { buffer, frames, format in
                     transport.write(buffer, frameCount: frames, format: format)
                 }
+                startCaptureMeter(transport)
                 if request.recordPath != nil {
                     appendLog("WAV-Mitschnitt vor dem Encoder: \(request.recordPath ?? "")")
                 }
@@ -452,7 +509,9 @@ final class AppModel {
                 teardownAudio()
             }
         case .levels(let newLevels):
-            levels = newLevels
+            // With a real capture the meter comes from the capture itself (v0.1.2);
+            // the helper's levels are measured after the radio pacing.
+            if pcmTransport == nil { levels = newLevels }
         case .broadcastFound(let broadcast):
             if !nearbyBroadcasts.contains(broadcast) { nearbyBroadcasts.append(broadcast) }
         case .scanComplete:
@@ -491,7 +550,43 @@ final class AppModel {
         }
     }
 
+    /// Level meter + capture counters straight from the capture (20 Hz), so the
+    /// meter shows what is captured, not what the radio managed to send.
+    private func startCaptureMeter(_ transport: FifoPCMTransport) {
+        meterTask?.cancel()
+        meterTask = Task { [weak self] in
+            var lastFrames = transport.capturedFrames
+            var lastDropped = transport.droppedFrames
+            var lastTime = ContinuousClock.now
+            var tick = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(50))
+                guard let self else { return }
+                if let levels = transport.takeLevels() { self.levels = levels }
+                tick += 1
+                if tick % 20 == 0 {
+                    let now = ContinuousClock.now
+                    let seconds = Double((now - lastTime).components.attoseconds) / 1e18 + Double((now - lastTime).components.seconds)
+                    let frames = transport.capturedFrames
+                    let dropped = transport.droppedFrames
+                    self.captureStats = CaptureStats(
+                        framesPerSecond: seconds > 0 ? Double(frames - lastFrames) / seconds : 0,
+                        sampleRate: transport.sampleRate,
+                        fifoDroppedPerSecond: seconds > 0 ? Double(dropped - lastDropped) / seconds : 0,
+                        fifoDroppedTotal: dropped
+                    )
+                    lastFrames = frames
+                    lastDropped = dropped
+                    lastTime = now
+                }
+            }
+        }
+    }
+
     private func teardownAudio() {
+        meterTask?.cancel()
+        meterTask = nil
+        captureStats = nil
         capture?.stop()
         capture = nil
         pcmTransport?.close()
@@ -508,7 +603,7 @@ final class AppModel {
                     let wasMissing = !self.dongleDetection.isReady
                     self.dongleDetection = state
                     // Dongle plugged in while the engine idles: connect for the status.
-                    if state.isReady, wasMissing, self.engineKind == .bumble,
+                    if state.isReady, wasMissing, self.engineKind == .bumble, !self.firmwareMaintenance,
                        !self.engineStatus.controllerConnected, !self.isLive {
                         await self.connectEngine()
                     }

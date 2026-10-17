@@ -117,6 +117,44 @@ def test_jitter_buffer() -> None:
 
 
 # -----------------------------------------------------------------------------
+def test_stall_flush() -> None:
+    """v0.1.1 log: a 5-8 s radio stall filled the ring to 250 ms, then ~100
+    slips/s for 90 s. Now: one flush back to the target, then normal drift."""
+    print('jitter buffer after a stall (flush instead of slip storm)')
+    bpf = 8
+    frame = 480
+    ring = h.PcmRing(bpf, RATE // 4)
+    picker = h.FramePicker(ring, frame, RATE * 30 // 1000, channels=2, float_samples=True, sample_rate=RATE)
+    written = 0
+    mac_time = 0.0
+    out = array.array('f')
+    radio_time = 0.0
+    i = 0
+    stall_from, stall_to = 1000, 1600  # 6 s without the radio taking frames
+    while i < 4000:
+        radio_time = (i + 1) * frame / RATE
+        while mac_time <= radio_time:
+            ring.write(sine_stereo(written, 512))
+            written += 512
+            mac_time += 512 / RATE
+        if stall_from <= i < stall_to:
+            i += 1
+            continue
+        out.frombytes(picker.next())
+        i += 1
+    check(picker.flushes == 1, f'one flush after the stall (got {picker.flushes})')
+    slips = picker.slips_dropped + picker.slips_inserted
+    check(slips <= 40, f'no slip storm after the stall (got {slips} slips)')
+    fill_ms = ring.frames * 1000 / RATE
+    check(fill_ms < 30 + 25, f'fill back near the 30 ms target ({fill_ms:.1f} ms)')
+    left = out[0::2]
+    tail = left[-RATE * 10 :]  # last 10 s: clean sine, no jumps
+    jumps = sum(1 for k in range(len(tail) - 1) if abs(tail[k + 1] - tail[k]) > 0.08)
+    check(jumps == 0, f'clean signal after recovery ({jumps} jumps)')
+    print(f'         flushed {picker.flushed_frames} frames, slips {slips}, fill {fill_ms:.1f} ms')
+
+
+# -----------------------------------------------------------------------------
 def test_lc3_roundtrip() -> None:
     print('LC3 round trip (ring → encode → per-BIS decode)')
     lc3 = h.lc3
@@ -285,6 +323,7 @@ def test_engine_loop() -> None:
 
 if __name__ == '__main__':
     test_jitter_buffer()
+    test_stall_flush()
     test_lc3_roundtrip()
     test_engine_loop()
     print('FAILED:' if FAILURES else 'all pipeline tests passed', *FAILURES, sep='\n  ')
