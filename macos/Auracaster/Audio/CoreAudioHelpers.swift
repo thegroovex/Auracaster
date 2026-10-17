@@ -64,6 +64,40 @@ enum CoreAudioHelpers {
         return object
     }
 
+    static func defaultOutputDevice() throws -> AudioDeviceID {
+        let device = try value(systemObject, kAudioHardwarePropertyDefaultOutputDevice,
+                               initial: AudioDeviceID(kAudioObjectUnknown))
+        guard device != AudioDeviceID(kAudioObjectUnknown) else { throw AudioCaptureError.noOutputDevice }
+        return device
+    }
+
+    // MARK: Process objects (macOS 14.2+)
+
+    /// Every process Core Audio knows about (anything that opened audio IO).
+    static func processObjects() -> [AudioObjectID] {
+        var addr = Self.address(kAudioHardwarePropertyProcessObjectList)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(systemObject, &addr, 0, nil, &size) == noErr, size > 0 else {
+            return []
+        }
+        var objects = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(systemObject, &addr, 0, nil, &size, &objects) == noErr else { return [] }
+        return objects
+    }
+
+    static func pid(ofProcessObject object: AudioObjectID) -> pid_t? {
+        try? value(object, kAudioProcessPropertyPID, initial: pid_t(-1))
+    }
+
+    static func bundleID(ofProcessObject object: AudioObjectID) -> String? {
+        (try? string(object, kAudioProcessPropertyBundleID)).flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// True while the process is actively playing audio.
+    static func isRunningOutput(_ object: AudioObjectID) -> Bool {
+        ((try? value(object, kAudioProcessPropertyIsRunningOutput, initial: UInt32(0))) ?? 0) != 0
+    }
+
     static func allDevices() throws -> [AudioDeviceID] {
         var addr = Self.address(kAudioHardwarePropertyDevices)
         var size: UInt32 = 0

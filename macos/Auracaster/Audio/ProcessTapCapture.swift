@@ -1,3 +1,4 @@
+import AppKit
 import AudioToolbox
 import CoreAudio
 import Foundation
@@ -19,6 +20,20 @@ import Foundation
 final class ProcessTapCapture: AudioCapture {
     private(set) var streamFormat: AudioStreamBasicDescription?
     private(set) var isRunning = false
+    /// Device whose clock drives the tap aggregate (for the log).
+    private(set) var outputDeviceName: String?
+
+    /// e.g. "48000 Hz · 2 ch · Float32 · interleaved · Takt: MacBook Pro-Lautsprecher"
+    var formatDescription: String {
+        guard let format = streamFormat else { return "unbekannt" }
+        let isFloat = (format.mFormatFlags & AudioFormatFlags(kAudioFormatFlagIsFloat)) != 0
+        let nonInterleaved = (format.mFormatFlags & AudioFormatFlags(kAudioFormatFlagIsNonInterleaved)) != 0
+        var text = "\(Int(format.mSampleRate)) Hz · \(format.mChannelsPerFrame) ch · "
+        text += isFloat ? "Float\(format.mBitsPerChannel)" : "Int\(format.mBitsPerChannel)"
+        text += nonInterleaved ? " · non-interleaved" : " · interleaved"
+        if let outputDeviceName { text += " · Takt: \(outputDeviceName)" }
+        return text
+    }
 
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
@@ -38,7 +53,17 @@ final class ProcessTapCapture: AudioCapture {
                 let excluded = excludedPIDs.compactMap { try? CoreAudioHelpers.processObject(for: $0) }
                 try createTap(CATapDescription(stereoGlobalTapButExcludeProcesses: excluded))
             case .applications(let pids):
-                let processes = try pids.map { try CoreAudioHelpers.processObject(for: $0) }
+                // Main process + helpers (WebKit GPU/WebContent, "… Helper", XPC).
+                var processes: [AudioObjectID] = []
+                for pid in pids {
+                    for object in AppProcessResolver.match(appPID: pid).objects where !processes.contains(object) {
+                        processes.append(object)
+                    }
+                }
+                guard !processes.isEmpty else {
+                    let name = pids.first.flatMap { NSRunningApplication(processIdentifier: $0)?.localizedName }
+                    throw AudioCaptureError.appNotPlaying(name ?? "Die App")
+                }
                 try createTap(CATapDescription(stereoMixdownOfProcesses: processes))
             case .inputDevice(let uid):
                 guard let device = CoreAudioHelpers.device(withUID: uid) else {
@@ -102,8 +127,17 @@ final class ProcessTapCapture: AudioCapture {
             tap, kAudioTapPropertyFormat, initial: AudioStreamBasicDescription()
         )
 
-        let outputDevice = try CoreAudioHelpers.defaultSystemOutputDevice()
+        // Clock source of the aggregate: the DEFAULT output device (what the user
+        // hears), not the "system/alert sound" device, which may be a virtual
+        // driver (Pro Tools Audio Bridge, AirBeamTV, …) with its own clock.
+        let outputDevice: AudioDeviceID
+        if let device = try? CoreAudioHelpers.defaultOutputDevice() {
+            outputDevice = device
+        } else {
+            outputDevice = try CoreAudioHelpers.defaultSystemOutputDevice()
+        }
         let outputUID = try CoreAudioHelpers.string(outputDevice, kAudioDevicePropertyDeviceUID)
+        outputDeviceName = (try? CoreAudioHelpers.string(outputDevice, kAudioObjectPropertyName)) ?? outputUID
 
         let aggregate: [String: Any] = [
             kAudioAggregateDeviceNameKey: "Auracaster Tap",
@@ -128,6 +162,15 @@ final class ProcessTapCapture: AudioCapture {
                     "AudioHardwareCreateAggregateDevice")
         aggregateID = device
         ioDeviceID = device
+
+        // The IOProc delivers the aggregate's input stream format; prefer it over
+        // the tap description when they differ (sample rate follows the clock device).
+        if let aggregateFormat = try? CoreAudioHelpers.value(
+            device, kAudioDevicePropertyStreamFormat,
+            scope: kAudioObjectPropertyScopeInput, initial: AudioStreamBasicDescription()
+        ), aggregateFormat.mSampleRate > 0, aggregateFormat.mBytesPerFrame > 0 {
+            streamFormat = aggregateFormat
+        }
     }
 
     private func startIOProc(handler: @escaping AudioCaptureHandler) throws {

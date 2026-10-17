@@ -8,7 +8,7 @@ actor MockEngine: BroadcastEngine {
 
     private var launched = false
     private var levelTask: Task<Void, Never>?
-    private var preset: BroadcastPreset = .ultraLow
+    private var preset: BroadcastPreset = .default
     private var broadcastID = 0
 
     init() {
@@ -59,6 +59,23 @@ actor MockEngine: BroadcastEngine {
             continuation.yield(.broadcastFound(broadcast))
         }
         continuation.yield(.scanComplete(count: samples.count))
+    }
+
+    func connect() async throws {
+        try await launch()
+    }
+
+    func requestControllerInfo() async throws {
+        try await launch()
+        continuation.yield(.controllerInfo(ControllerInfo(
+            connected: true, transport: "mock", address: "F0:F1:F2:F3:F4:F5",
+            hciVersion: "BLUETOOTH_CORE_6_0", lmpVersion: "BLUETOOTH_CORE_6_0",
+            company: "Simulation", isoBroadcaster: true, periodicAdvertising: true,
+            advertisingSets: 2, maxAdvertisingData: 191, aclPackets: 4, isoPackets: 16,
+            leFeatures: ["LE_ENCRYPTION", "LE_2M_PHY", "LE_EXTENDED_ADVERTISING",
+                         "LE_PERIODIC_ADVERTISING", "ISOCHRONOUS_BROADCASTER"],
+            serialPorts: [], helperVersion: "mock", error: nil
+        )))
     }
 
     func shutdown() async {

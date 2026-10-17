@@ -87,6 +87,7 @@ struct DongleStatusView: View {
     private var color: Color {
         switch status {
         case .connected: .green
+        case .detected: .green
         case .simulated: .orange
         case .error: .red
         case .notStarted: .secondary

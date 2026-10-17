@@ -68,8 +68,9 @@ final class FifoPCMTransport: PCMTransport, @unchecked Sendable {
 
     init(path: String = FifoPCMTransport.defaultPath, sampleRate: Int = 48_000, channels: Int = 2) throws {
         guard [16_000, 24_000, 48_000].contains(sampleRate) else {
-            // TODO: AVAudioConverter-Resampling (z. B. 44,1 kHz → 48 kHz) vor dem Schreiben.
-            throw PCMTransportError.unsupportedFormat("\(sampleRate) Hz (erwartet 16/24/48 kHz)")
+            throw PCMTransportError.unsupportedFormat(
+                "Das Ausgabegerät läuft mit \(sampleRate) Hz. Bitte im Programm „Audio-MIDI-Setup“ auf 48 000 Hz stellen."
+            )
         }
         guard (1...2).contains(channels) else {
             throw PCMTransportError.unsupportedFormat("\(channels) Kanäle")

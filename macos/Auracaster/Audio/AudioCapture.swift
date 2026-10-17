@@ -38,13 +38,19 @@ enum AudioCaptureError: LocalizedError {
     case processNotFound(pid_t)
     case coreAudio(String, OSStatus)
     case noOutputDevice
+    case appNotPlaying(String)
+    case permissionDenied
 
     var errorDescription: String? {
         switch self {
         case .unsupportedTarget: "Diese Quelle wird noch nicht unterstützt."
-        case .processNotFound(let pid): "Prozess \(pid) hat kein Core-Audio-Objekt (spielt evtl. gerade nichts)."
+        case .processNotFound: "Diese App spielt gerade kein Audio. Starte die Wiedergabe oder wähle „Systemaudio“."
         case .coreAudio(let call, let status): "\(call) fehlgeschlagen (OSStatus \(status))."
         case .noOutputDevice: "Kein Standard-Ausgabegerät gefunden."
+        case .appNotPlaying(let name):
+            "„\(name)“ spielt gerade kein Audio. Starte dort die Wiedergabe und klicke erneut auf Senden – oder wähle oben „Systemaudio“."
+        case .permissionDenied:
+            "Auracaster darf das Systemaudio nicht aufnehmen. Erlaube „Bildschirm- & Systemaudioaufnahme → Nur Systemaudio“ für Auracaster in den Systemeinstellungen."
         }
     }
 }

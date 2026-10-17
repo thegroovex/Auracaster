@@ -15,6 +15,8 @@ final class EngineSetup {
 
     private(set) var phase: Phase = .idle
     private(set) var log: [String] = []
+    /// Called after a successful setup (AppModel switches to the real engine).
+    @ObservationIgnored var onSuccess: (@MainActor () -> Void)?
 
     /// Default location of the engine environment created by the script.
     nonisolated static var defaultPython: URL {
@@ -26,8 +28,20 @@ final class EngineSetup {
         FileManager.default.isExecutableFile(atPath: defaultPython.path)
     }
 
+    /// Ref written by setup-engine.sh (e.g. "v0.1.1"); nil for v0.1.0 installs.
+    nonisolated static var installedRef: String? {
+        let url = defaultPython.deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("engine-version")
+        return (try? String(contentsOf: url, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The venv was installed for another app version → reinstall (app update).
+    nonisolated static var isOutdated: Bool {
+        installedRef != "v\(UpdateService.currentVersion.description)"
+    }
+
     private init() {
-        if Self.isInstalled { phase = .succeeded }
+        if Self.isInstalled && !Self.isOutdated { phase = .succeeded }
     }
 
     func run() {
@@ -47,8 +61,10 @@ final class EngineSetup {
                 let defaults = UserDefaults.standard
                 defaults.set(python, forKey: SettingsKeys.pythonPath)
                 defaults.set(EngineKind.bumble.rawValue, forKey: SettingsKeys.engineKind)
+                defaults.set(false, forKey: SettingsKeys.simulationChosen)
                 defaults.set("auto", forKey: SettingsKeys.transport)
                 phase = .succeeded
+                onSuccess?()
             } catch {
                 phase = .failed(error.localizedDescription)
             }

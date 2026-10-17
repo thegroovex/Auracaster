@@ -5,8 +5,8 @@ import Foundation
 // The SwiftUI layer only talks to `BroadcastEngine`. Two implementations:
 //   • `BumbleEngineClient` – launches engine/auracaster_helper.py (Bumble) as a
 //     subprocess and speaks JSON Lines over stdin/stdout.
-//   • `MockEngine` – in-process simulation for SwiftUI previews and UI work
-//     without a USB dongle.
+//   • `MockEngine` – in-process simulation for SwiftUI previews, the CI
+//     screenshot mode and explicit "Simulation" in the settings.
 
 /// Everything the engine needs to start one broadcast (one BIG).
 struct BroadcastRequest: Sendable, Equatable {
@@ -22,7 +22,9 @@ struct BroadcastRequest: Sendable, Equatable {
     var audioInput: String = "silence"
     /// Raw PCM format: "float32le,48000,2" or "int16le,48000,2".
     var audioFormat: String = "float32le,48000,2"
-    var preset: BroadcastPreset = .ultraLow
+    var preset: BroadcastPreset = .default
+    /// Debug: WAV of the PCM exactly as it enters the LC3 encoder.
+    var recordPath: String?
 }
 
 enum EngineState: String, Sendable, Codable {
@@ -82,6 +84,50 @@ struct StereoLevels: Sendable, Equatable {
     }
 }
 
+/// Audio pipeline counters from the helper (1 Hz while live).
+struct EngineStats: Sendable, Equatable {
+    var sdusPerSecond: Double
+    var completedPerSecond: Double
+    var pending: Int?
+    var underruns: Int
+    var overrunFrames: Int
+    var slipsDropped: Int
+    var slipsInserted: Int
+    var bufferMilliseconds: Double
+    var encodeMillisecondsAverage: Double
+    var encodeMillisecondsMax: Double
+    var loopMillisecondsMax: Double
+    var serialBytesPerSecond: Int
+    var controllerResets: Int
+    var framesSent: Int
+}
+
+/// Result of "Dongle prüfen" (helper `controller_info`).
+struct ControllerInfo: Sendable, Equatable {
+    struct SerialPort: Sendable, Equatable, Hashable {
+        var device: String
+        var product: String?
+        var vendorProduct: String?
+    }
+
+    var connected: Bool
+    var transport: String?
+    var address: String?
+    var hciVersion: String?
+    var lmpVersion: String?
+    var company: String?
+    var isoBroadcaster: Bool?
+    var periodicAdvertising: Bool?
+    var advertisingSets: Int?
+    var maxAdvertisingData: Int?
+    var aclPackets: Int?
+    var isoPackets: Int?
+    var leFeatures: [String]
+    var serialPorts: [SerialPort]
+    var helperVersion: String?
+    var error: String?
+}
+
 enum EngineEvent: Sendable {
     case ready(version: String, lc3Available: Bool)
     case status(EngineStatus)
@@ -92,6 +138,10 @@ enum EngineEvent: Sendable {
     case failure(id: Int?, message: String)
     case log(String)
     case terminated(exitCode: Int32)
+    /// Helper is about to exit (import error, crash) – message + traceback.
+    case fatal(message: String, traceback: String)
+    case stats(EngineStats)
+    case controllerInfo(ControllerInfo)
 }
 
 enum EngineError: LocalizedError {
@@ -120,5 +170,9 @@ protocol BroadcastEngine: Sendable {
     func stop() async throws
     func requestStatus() async throws
     func scan(duration: Double) async throws
+    /// Opens the dongle without broadcasting (toolbar status).
+    func connect() async throws
+    /// Diagnostics: controller name, version, LE features, serial ports.
+    func requestControllerInfo() async throws
     func shutdown() async
 }

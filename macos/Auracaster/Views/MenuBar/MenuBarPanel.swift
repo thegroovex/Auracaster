@@ -54,7 +54,7 @@ struct MenuBarPanel: View {
                     } label: {
                         Label("Quelle", systemImage: "waveform")
                     }
-                    .disabled(model.isLive)
+                    .disabled(model.isTransitioning)
                 }
                 .module()
 
@@ -78,11 +78,12 @@ struct MenuBarPanel: View {
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
-                    .disabled(model.isLive)
+                    .disabled(model.isTransitioning)
                 }
                 .module()
 
-                // Receivers
+                // Receivers (Broadcast Assistant; demo data only in the simulation)
+                if !model.receivers.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Empfänger")
                         .font(.subheadline.weight(.semibold))
@@ -101,6 +102,7 @@ struct MenuBarPanel: View {
                     }
                 }
                 .module()
+                }
 
                 if updater.isUpdateAvailable {
                     Button {

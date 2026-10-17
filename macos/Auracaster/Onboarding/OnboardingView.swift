@@ -11,6 +11,7 @@ struct OnboardingView: View {
     @AppStorage(SettingsKeys.hasCompletedOnboarding) private var hasCompletedOnboarding = false
     @State private var step: Int
     @State private var dongle: DongleDetector.State = .none
+    @State private var audioPermission: AudioCapturePermission.Status = AudioCapturePermission.status
     @State private var microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)
     private var setup: EngineSetup { EngineSetup.shared }
     var isShowcase = false
@@ -190,12 +191,7 @@ struct OnboardingView: View {
                 case .running:
                     ProgressView().controlSize(.small)
                 case .succeeded:
-                    if !isShowcase && !model.isSimulated {
-                        EmptyView()
-                    } else {
-                        Button("Neu starten") { setup.relaunch() }
-                            .buttonStyle(.glassProminent)
-                    }
+                    EmptyView()
                 default:
                     Button("Engine einrichten") { setup.run() }
                         .buttonStyle(.glassProminent)
@@ -206,11 +202,16 @@ struct OnboardingView: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 Text("Audio-Freigabe").font(.subheadline.weight(.semibold))
-                Text("Beim **ersten Senden** fragt macOS, ob Auracaster Systemaudio aufnehmen darf – bitte **Erlauben**. Für Mikrofone/Audio-Interfaces kommt eine eigene Abfrage.")
+                Text("macOS fragt einmal, ob Auracaster Systemaudio aufnehmen darf – bitte **Erlauben**. Status: **\(audioPermission.title)**. Für Mikrofone/Audio-Interfaces kommt eine eigene Abfrage.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack {
+                    Button(audioPermission == .authorized ? "Systemaudio erlaubt ✓" : "Systemaudio erlauben") {
+                        Task { audioPermission = await AudioCapturePermission.requestAccess()
+                            if audioPermission != .authorized { AudioCapturePermission.openSettings() } }
+                    }
+                    .disabled(audioPermission == .authorized)
                     Button(microphoneButtonTitle) { requestMicrophone() }
                         .disabled(microphoneStatus == .authorized)
                     Button("Datenschutz-Einstellungen öffnen") {
@@ -228,12 +229,12 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 14) {
             stepHeader("dot.radiowaves.left.and.right", "Dein erster Stream",
                        "So hörst du in weniger als einer Minute mit:")
-            numbered(1, "Links eine **Quelle** wählen – z. B. *Systemaudio* oder eine App wie Musik.")
+            numbered(1, "Die **Quelle** steht oben neben dem Namen – voreingestellt ist *Systemaudio* (alles, was der Mac abspielt).")
             numbered(2, "Oben rechts auf **Senden** klicken. Der Knopf wird rot: *On Air*.")
             numbered(3, "Kopfhörer/Hörgerät: in der Hersteller-App bzw. am Smartphone unter *Auracast* den Sender **„\(model.broadcastName)“** wählen – oder den **QR-Code** im Studio scannen.")
             numbered(4, "Lautstärke und Preset (*Ultra-Low* für Live, *Hohe Qualität* für Musik) jederzeit in der Menüleiste.")
             if model.isSimulated && !isShowcase {
-                Label("Ohne Engine läuft Auracaster im Simulationsmodus – alles klickbar, aber ohne Funk.", systemImage: "testtube.2")
+                Label("Ohne Engine läuft Auracaster im Simulationsmodus – alles klickbar, aber ohne Funk. Nach „Engine einrichten“ schaltet die App automatisch auf den Dongle um.", systemImage: "testtube.2")
                     .font(.callout)
                     .foregroundStyle(.orange)
             }
@@ -282,7 +283,7 @@ struct OnboardingView: View {
         switch effectiveSetupPhase {
         case .idle: "Engine noch nicht eingerichtet"
         case .running: "Wird eingerichtet … (ca. 1–2 Minuten)"
-        case .succeeded: model.isSimulated ? "Engine bereit – Neustart aktiviert den Dongle-Betrieb" : "Engine bereit"
+        case .succeeded: "Engine bereit – Dongle-Betrieb aktiv"
         case .failed: "Einrichtung fehlgeschlagen"
         }
     }

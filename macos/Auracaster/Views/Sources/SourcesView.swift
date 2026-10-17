@@ -44,7 +44,7 @@ struct SourcesView: View {
     private func row(_ item: AudioSourceItem) -> some View {
         let isSelected = model.selectedSourceID == item.id
         return Button {
-            model.selectedSourceID = item.id
+            model.selectSource(item.id)
         } label: {
             HStack(spacing: 12) {
                 icon(for: item)
@@ -56,6 +56,12 @@ struct SourcesView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                if item.isPlaying {
+                    Label("spielt", systemImage: "speaker.wave.2.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                        .help("Diese App gibt gerade Audio aus")
+                }
                 if isSelected {
                     Label("Wird gesendet", systemImage: "checkmark.circle.fill")
                         .labelStyle(.iconOnly)
@@ -66,7 +72,7 @@ struct SourcesView: View {
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
-        .disabled(model.isLive)
+        .disabled(model.isTransitioning)
     }
 
     @ViewBuilder
@@ -86,7 +92,7 @@ struct SourcesView: View {
     private func subtitle(for item: AudioSourceItem) -> String {
         switch item.target {
         case .systemAudio: "Alles, was der Mac abspielt (Process Tap, global)"
-        case .applications(let pids): "Process Tap · PID \(pids.map(String.init).joined(separator: ", "))"
+        case .applications: item.isPlaying ? "Spielt gerade Audio · inkl. Hilfsprozesse" : "Spielt gerade nichts"
         case .inputDevice: "Core-Audio-Eingang"
         }
     }
@@ -94,7 +100,7 @@ struct SourcesView: View {
     private var footer: String {
         switch category {
         case .system: "Erfordert die Berechtigung „Systemaudio-Aufnahme“. Auracaster selbst wird ausgeschlossen."
-        case .apps: "Eine App liefert nur Audio, solange sie gerade etwas abspielt."
+        case .apps: "Eine App liefert nur Audio, solange sie gerade etwas abspielt. Browser (Safari, Chrome …) werden samt ihrer Audio-Hilfsprozesse erfasst."
         case .inputs: "Mikrofone und Audio-Interfaces."
         }
     }

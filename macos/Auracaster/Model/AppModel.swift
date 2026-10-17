@@ -1,6 +1,18 @@
+import AppKit
 import Foundation
 import Observation
 import SwiftUI
+
+/// What the error alert offers besides "OK".
+enum ErrorAction: Equatable, Sendable {
+    case none
+    /// Engine crashed or failed: copy the log for a bug report.
+    case copyLog
+    /// System audio recording permission missing.
+    case openAudioPrivacy
+    /// Engine installation broken/outdated.
+    case setupEngine
+}
 
 /// Central app state shared by the main window and the menu bar extra.
 @MainActor
@@ -8,7 +20,13 @@ import SwiftUI
 final class AppModel {
     // MARK: Broadcast settings
     var broadcastName = "Wohnzimmer"
-    var preset: BroadcastPreset = .ultraLow
+    var preset: BroadcastPreset = .default {
+        didSet {
+            guard preset != oldValue else { return }
+            UserDefaults.standard.set(preset.rawValue, forKey: SettingsKeys.preset)
+            restartIfLive()
+        }
+    }
     var volume: Double = 0.8 {
         didSet { pcmTransport?.gain = Float(volume) }
     }
@@ -18,48 +36,99 @@ final class AppModel {
     // MARK: Sources & routing
     var sources: [AudioSourceItem] = []
     var selectedSourceID: AudioSourceItem.ID? {
-        didSet { syncRoutingWithSelection() }
+        didSet {
+            guard selectedSourceID != oldValue else { return }
+            syncRoutingWithSelection()
+            restartIfLive()
+        }
     }
     var routing = RoutingGraph(sources: [], streams: [], connections: [])
 
     // MARK: Engine state
+    private(set) var engineKind: EngineKind
     private(set) var engineStatus: EngineStatus = .notLaunched
     private(set) var levels: StereoLevels = .silent
     private(set) var isTransitioning = false
     private(set) var isScanning = false
     private(set) var helperVersion: String?
     private(set) var logLines: [String] = []
+    private(set) var stats: EngineStats?
+    private(set) var controllerInfo: ControllerInfo?
+    private(set) var isCheckingDongle = false
+    private(set) var dongleDetection: DongleDetector.State = .none
+    private(set) var captureFormat: String?
     var lastError: String?
+    var lastErrorAction: ErrorAction = .none
 
     // MARK: Receivers
-    var receivers: [Receiver] = Receiver.samples
+    /// Empty with real engines (Broadcast Assistant comes later); demo data in simulation.
+    var receivers: [Receiver] = []
     private(set) var nearbyBroadcasts: [DiscoveredBroadcast] = []
 
     // MARK: Private
     @ObservationIgnored private var engine: any BroadcastEngine
-    private let engineKind: EngineKind
     @ObservationIgnored private var eventTask: Task<Void, Never>?
     @ObservationIgnored private var startTask: Task<Void, Never>?
+    @ObservationIgnored private var detectionTask: Task<Void, Never>?
     @ObservationIgnored private var capture: ProcessTapCapture?
     @ObservationIgnored private var pcmTransport: FifoPCMTransport?
+    @ObservationIgnored private var expectingTermination = false
+    private let isPreview: Bool
+
+    /// Engine used when nothing was chosen explicitly: the real one whenever the
+    /// Python environment exists, the simulation only in screenshot mode.
+    static var preferredEngineKind: EngineKind {
+        if ScreenshotMode.isActive { return .mock }
+        if let stored = UserDefaults.standard.string(forKey: SettingsKeys.engineKind),
+           let kind = EngineKind(rawValue: stored) {
+            // v0.1.0 stored "mock" by default; only honour it when explicitly chosen.
+            if kind == .mock && !UserDefaults.standard.bool(forKey: SettingsKeys.simulationChosen) {
+                return EngineSetup.isInstalled ? .bumble : .mock
+            }
+            return kind
+        }
+        return EngineSetup.isInstalled ? .bumble : .mock
+    }
 
     init(engine: (any BroadcastEngine)? = nil, loadSystemSources: Bool = true) {
-        let kind = EngineKind(rawValue: UserDefaults.standard.string(forKey: SettingsKeys.engineKind) ?? "") ?? .mock
+        let defaults = UserDefaults.standard
         if let engine {
             self.engine = engine
             self.engineKind = engine is MockEngine ? .mock : .bumble
+            self.isPreview = true
         } else {
+            let kind = Self.preferredEngineKind
             self.engineKind = kind
-            if kind == .mock {
-                self.engine = MockEngine()
-            } else {
-                self.engine = BumbleEngineClient()
-            }
+            self.engine = Self.makeEngine(kind)
+            self.isPreview = false
+        }
+        if let stored = defaults.string(forKey: SettingsKeys.preset), let saved = BroadcastPreset(rawValue: stored) {
+            preset = saved
         }
         sources = loadSystemSources ? SourceCatalog.load() : [AudioSourceItem.systemAudio]
-        selectedSourceID = sources.first?.id
+        // Newcomers: one click on "Senden" sends what the Mac plays.
+        selectedSourceID = AudioSourceItem.systemAudio.id
         routing = RoutingGraph.makeDefault(sources: sources, broadcastName: broadcastName)
+        receivers = engineKind == .mock ? Receiver.samples : []
         listen()
+        if !isPreview {
+            startDongleDetection()
+            EngineSetup.shared.onSuccess = { [weak self] in
+                Task { @MainActor in await self?.switchEngine(to: .bumble) }
+            }
+            if engineKind == .bumble {
+                Task { await connectEngine() }
+            }
+            // App updated → the engine environment must match (v0.1.0 had a broken package).
+            if EngineSetup.isInstalled && EngineSetup.isOutdated {
+                appendLog("Engine-Version passt nicht zur App – wird neu eingerichtet …")
+                EngineSetup.shared.run()
+            }
+        }
+    }
+
+    private static func makeEngine(_ kind: EngineKind) -> any BroadcastEngine {
+        kind == .mock ? MockEngine() : BumbleEngineClient()
     }
 
     // MARK: Derived
@@ -77,12 +146,19 @@ final class AppModel {
         return preset.estimatedLatencyMilliseconds
     }
 
+    /// Toolbar indicator. Depends only on the engine's controller state and the
+    /// USB device list – never on capture/permission errors.
     var dongleStatus: DongleStatus {
         if isSimulated { return .simulated }
-        if engineStatus.state == .error, let message = engineStatus.errorMessage { return .error(message) }
         if engineStatus.controllerConnected { return .connected(address: engineStatus.controllerAddress) }
-        if let lastError, engineStatus.state == .notLaunched { return .error(lastError) }
-        return .notStarted
+        switch dongleDetection {
+        case .dongle, .serialPort:
+            return .detected
+        case .bootloader:
+            return .error("Bootloader-Laufwerk – Firmware noch nicht geflasht")
+        case .none:
+            return .error("Kein Dongle per USB gefunden")
+        }
     }
 
     var joinURI: BroadcastURI {
@@ -92,6 +168,49 @@ final class AppModel {
             highQuality: preset.sampleRate == 48_000,
             broadcastCode: UserDefaults.standard.string(forKey: SettingsKeys.broadcastCode)
         )
+    }
+
+    var logText: String { logLines.joined(separator: "\n") }
+
+    // MARK: Engine switching (no app restart needed)
+
+    func switchEngine(to kind: EngineKind) async {
+        if kind == .mock {
+            UserDefaults.standard.set(true, forKey: SettingsKeys.simulationChosen)
+        } else {
+            UserDefaults.standard.set(false, forKey: SettingsKeys.simulationChosen)
+        }
+        UserDefaults.standard.set(kind.rawValue, forKey: SettingsKeys.engineKind)
+        await stopBroadcast()
+        expectingTermination = true
+        await engine.shutdown()
+        eventTask?.cancel()
+        engine = Self.makeEngine(kind)
+        engineKind = kind
+        engineStatus = .notLaunched
+        helperVersion = nil
+        stats = nil
+        controllerInfo = nil
+        levels = .silent
+        receivers = kind == .mock ? Receiver.samples : []
+        nearbyBroadcasts = []
+        expectingTermination = false
+        listen()
+        appendLog("Engine gewechselt: \(kind.title)")
+        if kind == .bumble { await connectEngine() }
+    }
+
+    /// Restarts the helper with the current settings (Python path, transport …).
+    func restartEngine() async {
+        await switchEngine(to: engineKind)
+    }
+
+    private func connectEngine() async {
+        do {
+            try await engine.connect()
+        } catch {
+            appendLog("Engine-Start: \(error.localizedDescription)")
+        }
     }
 
     // MARK: Actions
@@ -105,11 +224,15 @@ final class AppModel {
         }
     }
 
+    func selectSource(_ id: AudioSourceItem.ID) {
+        selectedSourceID = id
+    }
+
     func startBroadcast() async {
         guard !isTransitioning else { return }
         isTransitioning = true
         defer { isTransitioning = false }
-        lastError = nil
+        clearError()
 
         let defaults = UserDefaults.standard
         let code = defaults.string(forKey: SettingsKeys.broadcastCode).flatMap { $0.isEmpty ? nil : $0 }
@@ -121,12 +244,22 @@ final class AppModel {
             isPublic: defaults.object(forKey: SettingsKeys.isPublic) as? Bool ?? true,
             preset: preset
         )
+        if defaults.bool(forKey: SettingsKeys.recordEncoderInput) {
+            request.recordPath = Self.recordingURL().path
+        }
 
         do {
             if !isSimulated, let source = selectedSource {
+                // 0. System audio / apps need "System Audio Recording" permission.
+                if case .inputDevice = source.target {} else {
+                    let permission = await AudioCapturePermission.requestAccess()
+                    if permission == .denied { throw AudioCaptureError.permissionDenied }
+                }
                 // 1. Tap/aggregate anlegen und Format ermitteln.
                 let capture = ProcessTapCapture()
                 let format = try capture.prepare(target: source.target)
+                captureFormat = capture.formatDescription
+                appendLog("Quelle „\(source.name)“: \(capture.formatDescription)")
                 // 2. FIFO passend zum Format anlegen.
                 let transport = try FifoPCMTransport(
                     sampleRate: Int(format.mSampleRate),
@@ -144,6 +277,9 @@ final class AppModel {
                 try capture.start { buffer, frames, format in
                     transport.write(buffer, frameCount: frames, format: format)
                 }
+                if request.recordPath != nil {
+                    appendLog("WAV-Mitschnitt vor dem Encoder: \(request.recordPath ?? "")")
+                }
             } else {
                 request.audioInput = "silence"
                 try await engine.start(request)
@@ -151,7 +287,13 @@ final class AppModel {
         } catch is CancellationError {
             teardownAudio()
         } catch {
-            lastError = error.localizedDescription
+            let action: ErrorAction = {
+                if case AudioCaptureError.permissionDenied = error { return .openAudioPrivacy }
+                if case EngineError.pythonNotFound(_) = error { return .setupEngine }
+                if case EngineError.helperNotFound = error { return .copyLog }
+                return .none
+            }()
+            showError(error.localizedDescription, action: action)
             teardownAudio()
             try? await engine.stop()
         }
@@ -164,7 +306,19 @@ final class AppModel {
         do {
             try await engine.stop()
         } catch {
-            lastError = error.localizedDescription
+            if engineStatus.state != .notLaunched { showError(error.localizedDescription) }
+        }
+    }
+
+    /// Preset or source changed while live: restart with the new settings.
+    private func restartIfLive() {
+        guard isLive, !isTransitioning else { return }
+        startTask?.cancel()
+        startTask = nil
+        Task {
+            teardownAudio()
+            try? await engine.stop()
+            startTask = Task { await startBroadcast() }
         }
     }
 
@@ -176,16 +330,38 @@ final class AppModel {
             do {
                 try await engine.scan(duration: 6)
             } catch {
-                lastError = error.localizedDescription
+                showError(error.localizedDescription)
                 isScanning = false
             }
+        }
+    }
+
+    /// "Dongle prüfen": controller version, LE features, serial ports.
+    func checkDongle() {
+        guard !isCheckingDongle else { return }
+        isCheckingDongle = true
+        controllerInfo = nil
+        dongleDetection = DongleDetector.detect()
+        appendLog("Dongle prüfen – USB: \(dongleDetection.title); Ports: \(DongleDetector.serialPorts().joined(separator: ", "))")
+        Task {
+            do {
+                try await engine.requestControllerInfo()
+            } catch {
+                showError(error.localizedDescription, action: .copyLog)
+                isCheckingDongle = false
+            }
+            // Fallback if the helper never answers.
+            try? await Task.sleep(for: .seconds(12))
+            isCheckingDongle = false
         }
     }
 
     func refreshSources() {
         let selected = selectedSourceID
         sources = SourceCatalog.load()
-        selectedSourceID = sources.contains { $0.id == selected } ? selected : sources.first?.id
+        if !sources.contains(where: { $0.id == selected }) {
+            selectedSourceID = sources.first?.id
+        }
         let connections = routing.connections
         routing = RoutingGraph.makeDefault(sources: sources, broadcastName: broadcastName)
         routing.connections = connections.filter { connection in
@@ -207,8 +383,37 @@ final class AppModel {
     }
 
     func shutdown() async {
+        detectionTask?.cancel()
         await stopBroadcast()
+        expectingTermination = true
         await engine.shutdown()
+    }
+
+    func copyLogToPasteboard() {
+        let header = "Auracaster \(UpdateService.currentVersion.description) · Helper \(helperVersion ?? "?") · \(engineKind.rawValue)\n"
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(header + logText, forType: .string)
+    }
+
+    func clearError() {
+        lastError = nil
+        lastErrorAction = .none
+    }
+
+    func showError(_ message: String, action: ErrorAction = .none) {
+        lastError = message
+        lastErrorAction = action
+    }
+
+    /// ~/Library/Logs/Auracaster
+    static var logsDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Auracaster", isDirectory: true)
+    }
+
+    static func recordingURL() -> URL {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        return logsDirectory.appendingPathComponent("encoder-input-\(formatter.string(from: Date())).wav")
     }
 
     // MARK: Event handling
@@ -218,22 +423,32 @@ final class AppModel {
         let events = engine.events
         eventTask = Task { [weak self] in
             for await event in events {
-                guard let self else { return }
+                guard let self, !Task.isCancelled else { return }
                 self.handle(event)
             }
         }
+    }
+
+    private func appendLog(_ line: String) {
+        logLines.append(line)
+        if logLines.count > 500 { logLines.removeFirst(logLines.count - 500) }
     }
 
     private func handle(_ event: EngineEvent) {
         switch event {
         case .ready(let version, let lc3Available):
             helperVersion = version
-            if !lc3Available { lastError = "lc3py fehlt in der Python-Umgebung des Helpers." }
+            if !lc3Available {
+                showError("Der LC3-Encoder (lc3py) fehlt in der Engine. Bitte „Engine neu einrichten“.", action: .setupEngine)
+            }
         case .status(let status):
             engineStatus = status
-            if status.state != .live { levels = .silent }
+            if status.state != .live {
+                levels = .silent
+                if status.state != .starting { stats = nil }
+            }
             if status.state == .error {
-                lastError = status.errorMessage ?? lastError
+                showError(status.errorMessage ?? lastError ?? "Engine-Fehler", action: .copyLog)
                 teardownAudio()
             }
         case .levels(let newLevels):
@@ -245,17 +460,34 @@ final class AppModel {
         case .acknowledged:
             break
         case .failure(_, let message):
-            lastError = message
+            showError(message, action: .copyLog)
             startTask?.cancel()
             isScanning = false
+            isCheckingDongle = false
         case .log(let line):
-            logLines.append(line)
-            if logLines.count > 500 { logLines.removeFirst(logLines.count - 500) }
+            appendLog(line)
+        case .stats(let newStats):
+            stats = newStats
+        case .controllerInfo(let info):
+            controllerInfo = info
+            isCheckingDongle = false
+            appendLog("Dongle: \(info.connected ? "verbunden" : "nicht verbunden") \(info.hciVersion ?? "") ISO-Broadcaster: \(info.isoBroadcaster.map { $0 ? "ja" : "nein" } ?? "?") \(info.error ?? "")")
+        case .fatal(let message, let traceback):
+            appendLog("FATAL: \(message)")
+            for line in traceback.split(separator: "\n") { appendLog(String(line)) }
+            let tail = traceback.split(separator: "\n").suffix(8).joined(separator: "\n")
+            let action: ErrorAction = message.contains("Engine neu einrichten") ? .setupEngine : .copyLog
+            showError(tail.isEmpty ? message : "\(message)\n\n\(tail)", action: action)
+            teardownAudio()
         case .terminated(let exitCode):
             teardownAudio()
             engineStatus = .notLaunched
             levels = .silent
-            if exitCode != 0 { lastError = "Engine beendet (Exit-Code \(exitCode))." }
+            stats = nil
+            if exitCode != 0 && !expectingTermination && lastError == nil {
+                let tail = logLines.suffix(10).joined(separator: "\n")
+                showError("Engine beendet (Exit-Code \(exitCode)).\n\n\(tail)", action: .copyLog)
+            }
         }
     }
 
@@ -264,6 +496,26 @@ final class AppModel {
         capture = nil
         pcmTransport?.close()
         pcmTransport = nil
+    }
+
+    private func startDongleDetection() {
+        detectionTask?.cancel()
+        detectionTask = Task { [weak self] in
+            while !Task.isCancelled {
+                let state = DongleDetector.detect()
+                guard let self else { return }
+                if state != self.dongleDetection {
+                    let wasMissing = !self.dongleDetection.isReady
+                    self.dongleDetection = state
+                    // Dongle plugged in while the engine idles: connect for the status.
+                    if state.isReady, wasMissing, self.engineKind == .bumble,
+                       !self.engineStatus.controllerConnected, !self.isLive {
+                        await self.connectEngine()
+                    }
+                }
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
     }
 
     private func syncRoutingWithSelection() {
@@ -282,13 +534,14 @@ extension AppModel {
         let model = AppModel(engine: MockEngine(), loadSystemSources: false)
         model.sources += [
             AudioSourceItem(id: "app.ableton", name: "Ableton Live", category: .apps, symbol: "pianokeys",
-                            target: .applications(pids: [])),
+                            target: .applications(pids: []), isPlaying: true),
             AudioSourceItem(id: "app.music", name: "Musik", category: .apps, symbol: "music.note",
                             target: .applications(pids: [])),
             AudioSourceItem(id: "input.mic", name: "MacBook Mikrofon", category: .inputs, symbol: "mic.fill",
                             target: .inputDevice(uid: "BuiltInMicrophoneDevice")),
         ]
         model.routing = RoutingGraph.makeDefault(sources: model.sources, broadcastName: model.broadcastName)
+        model.receivers = Receiver.samples
         if live { model.toggleBroadcast() }
         return model
     }

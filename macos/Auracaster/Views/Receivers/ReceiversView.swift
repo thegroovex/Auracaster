@@ -1,13 +1,27 @@
 import SwiftUI
 
-/// Receivers of our broadcast (placeholder until Broadcast Assistant support)
-/// and other Auracast broadcasts nearby (real scan via the helper).
+/// Receivers of our broadcast and other Auracast broadcasts nearby (real scan
+/// via the helper). Receivers join on their own (phone, QR code); managing
+/// them from the Mac (Broadcast Assistant) follows in a later version.
 struct ReceiversView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         List {
             Section {
+                if model.receivers.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label("So hören Kopfhörer und Hörgeräte mit", systemImage: "earbuds")
+                            .font(.headline)
+                        Text("Auracast-Empfänger verbinden sich selbst und bleiben für den Sender unsichtbar. Am Smartphone unter *Auracast* (Samsung: *Auracast-Übertragungen*) den Sender **„\(model.broadcastName)“** wählen – oder im Studio den QR-Code scannen.")
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text("Kopfhörer direkt vom Mac aus verbinden (Broadcast-Assistent) folgt in einer späteren Version.")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.vertical, 6)
+                }
                 ForEach(model.receivers) { receiver in
                     HStack(spacing: 12) {
                         Image(systemName: receiver.kind.symbol)
@@ -32,8 +46,10 @@ struct ReceiversView: View {
             } header: {
                 Text("Empfänger")
             } footer: {
-                Text("Platzhalter: Broadcast-Empfänger sind passiv und für den Sender unsichtbar. Echte Einträge kommen mit der Broadcast-Assistant-Rolle (BASS).")
-                    .foregroundStyle(.secondary)
+                if model.isSimulated && !model.receivers.isEmpty {
+                    Text("Simulation – Beispieldaten.")
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section {

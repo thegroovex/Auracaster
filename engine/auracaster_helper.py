@@ -1215,8 +1215,13 @@ async def handle_command(engine: Engine, message: dict[str, Any]) -> bool:
         elif cmd == 'controller_info':
             emit('controller_info', id=request_id, **(await engine.controller_details()))
         elif cmd == 'connect':
-            # open the dongle right away so the app can show its status
-            await engine.ensure_device()
+            # Open the dongle right away so the app can show its status. Not an
+            # error when it is missing (yet): the app shows "Kein Dongle".
+            try:
+                await engine.ensure_device()
+            except Exception as error:  # pylint: disable=broad-except
+                logger.info('connect: %s', error)
+                emit('status', **engine.status())
         elif cmd == 'ping':
             pass
         else:

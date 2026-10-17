@@ -26,8 +26,12 @@ struct StudioView: View {
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
-                        .disabled(model.isLive)
-                        .help(model.isLive ? "Preset-Wechsel erst nach dem Stoppen" : "Latenz/Qualität wählen")
+                        .disabled(model.isTransitioning)
+                        .help("Latenz/Qualität wählen – während des Sendens startet der Broadcast kurz neu")
+
+                        Label(model.preset.detail, systemImage: model.preset.isExperimental ? "exclamationmark.triangle" : "info.circle")
+                            .font(.caption)
+                            .foregroundStyle(model.preset.isExperimental ? Color.orange : Color.secondary)
 
                         StereoLevelMeter(levels: model.levels)
 

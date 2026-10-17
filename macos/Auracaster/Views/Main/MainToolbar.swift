@@ -11,6 +11,10 @@ struct MainToolbar: ToolbarContent {
             DongleStatusView(status: model.dongleStatus)
         }
 
+        ToolbarItem(placement: .navigation) {
+            SourcePickerMenu()
+        }
+
         ToolbarItem(placement: .principal) {
             LatencyPill(milliseconds: model.latencyMilliseconds, isLive: model.isLive, style: .plain)
         }
@@ -22,5 +26,41 @@ struct MainToolbar: ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
             OnAirButton()
         }
+    }
+}
+
+/// Prominent source picker next to the broadcast name: what is being sent.
+struct SourcePickerMenu: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        Menu {
+            ForEach(SourceCategory.allCases, id: \.self) { category in
+                let items = model.sources.filter { $0.category == category }
+                if !items.isEmpty {
+                    Section(category.title) {
+                        ForEach(items) { item in
+                            Button {
+                                model.selectSource(item.id)
+                            } label: {
+                                if item.id == model.selectedSourceID {
+                                    Label(item.name, systemImage: "checkmark")
+                                } else if item.isPlaying {
+                                    Label(item.name + " – spielt", systemImage: "speaker.wave.2")
+                                } else {
+                                    Text(item.name)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Divider()
+            Button("Liste aktualisieren", systemImage: "arrow.clockwise") { model.refreshSources() }
+        } label: {
+            Label(model.selectedSource?.name ?? "Quelle wählen", systemImage: model.selectedSource?.symbol ?? "waveform")
+                .labelStyle(.titleAndIcon)
+        }
+        .help("Audioquelle des Broadcasts")
     }
 }

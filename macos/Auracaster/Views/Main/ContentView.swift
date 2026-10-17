@@ -74,7 +74,7 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .navigationTitle(model.broadcastName)
-        .navigationSubtitle(model.isLive ? "Auf Sendung" : "Bereit")
+        .navigationSubtitle((model.isLive ? "Auf Sendung" : "Bereit") + " · " + (model.selectedSource?.name ?? "keine Quelle"))
         .toolbar { MainToolbar(model: model) }
         .sheet(isPresented: $showOnboarding) {
             OnboardingView()
@@ -94,15 +94,29 @@ struct ContentView: View {
         .onChange(of: ScreenshotDirector.shared.sidebarItem) { _, item in
             if let item { selection = item }
         }
+        .onChange(of: selection) { _, item in
+            // "Systemaudio" is a single source: selecting the category selects it.
+            if item == .systemAudio { model.selectSource(AudioSourceItem.systemAudio.id) }
+        }
         .alert(
             "Auracaster",
             isPresented: Binding(
                 get: { model.lastError != nil },
-                set: { if !$0 { model.lastError = nil } }
+                set: { if !$0 { model.clearError() } }
             ),
             presenting: model.lastError
         ) { _ in
-            Button("OK", role: .cancel) { model.lastError = nil }
+            switch model.lastErrorAction {
+            case .copyLog:
+                Button("Protokoll kopieren") { model.copyLogToPasteboard(); model.clearError() }
+            case .openAudioPrivacy:
+                Button("Systemeinstellungen öffnen") { AudioCapturePermission.openSettings(); model.clearError() }
+            case .setupEngine:
+                Button("Engine neu einrichten") { EngineSetup.shared.run(); model.clearError() }
+            case .none:
+                EmptyView()
+            }
+            Button("OK", role: .cancel) { model.clearError() }
         } message: { message in
             Text(message)
         }

@@ -3,9 +3,10 @@ import Foundation
 /// A device listening to our broadcast.
 ///
 /// Broadcast receivers are passive (BIS sync, no connection), so the sender
-/// cannot enumerate them. Real entries will come from the Broadcast Assistant
-/// role (BASS, connection to the receiver) – see roadmap. Until then the list
-/// holds placeholders for the UI.
+/// cannot enumerate them. Entries will come from the Broadcast Assistant role
+/// (BASS, connection to the receiver), planned after v0.1.1. Until then the
+/// list is empty with real engines; `samples` are only shown in the
+/// simulation and the CI screenshot mode.
 struct Receiver: Identifiable, Hashable, Sendable {
     enum Kind: String, Sendable {
         case hearingAid, earbuds, speaker, headphones
@@ -42,6 +43,8 @@ struct Receiver: Identifiable, Hashable, Sendable {
 /// Toolbar dongle indicator, derived from the engine status.
 enum DongleStatus: Equatable, Sendable {
     case notStarted
+    /// USB device present, engine not (yet) connected to it.
+    case detected
     case connected(address: String?)
     case simulated
     case error(String)
@@ -49,6 +52,7 @@ enum DongleStatus: Equatable, Sendable {
     var title: String {
         switch self {
         case .notStarted: "Dongle"
+        case .detected: "Dongle erkannt"
         case .connected: "nRF52840"
         case .simulated: "Simulation"
         case .error: "Kein Dongle"
@@ -58,6 +62,7 @@ enum DongleStatus: Equatable, Sendable {
     var symbol: String {
         switch self {
         case .notStarted: "cable.connector"
+        case .detected: "cable.connector"
         case .connected: "cable.connector"
         case .simulated: "testtube.2"
         case .error: "cable.connector.slash"
@@ -67,6 +72,7 @@ enum DongleStatus: Equatable, Sendable {
     var detail: String {
         switch self {
         case .notStarted: "Engine noch nicht gestartet"
+        case .detected: "Auracaster-Dongle per USB erkannt – die Engine verbindet sich beim Senden"
         case .connected(let address): "USB-HCI verbunden" + (address.map { " · \($0)" } ?? "")
         case .simulated: "MockEngine aktiv, kein Funk"
         case .error(let message): message

@@ -132,14 +132,14 @@ def test_lc3_roundtrip() -> None:
         frame_size = encoder.get_frame_bytes(bitrate)
         decoders = [lc3.Decoder(frame_us, codec_rate) for _ in range(2)]
         ring = h.PcmRing(8, RATE)
-        picker = h.FramePicker(ring, frame_samples, frame_samples)
         written = 0
         decoded: list[list[float]] = [[], []]
         for _ in range(int(1.0 * 1e6 / frame_us)):
             while ring.frames < 2 * frame_samples:
                 ring.write(sine_stereo(written, 512))
                 written += 512
-            pcm = picker.next()
+            pcm = ring.read(frame_samples)  # exact frame boundaries, no drift slips here
+            assert pcm is not None
             data = encoder.encode(pcm, num_bytes=2 * frame_size, bit_depth=None)
             for index in range(2):
                 sdu = data[index * frame_size : (index + 1) * frame_size]

@@ -174,6 +174,16 @@ actor BumbleEngineClient: BroadcastEngine {
         try send(HelperProtocol.Command(cmd: "scan", id: makeRequestID(), duration: duration))
     }
 
+    func connect() async throws {
+        try await launch()
+        try send(HelperProtocol.Command(cmd: "connect", id: makeRequestID()))
+    }
+
+    func requestControllerInfo() async throws {
+        try await launch()
+        try send(HelperProtocol.Command(cmd: "controller_info", id: makeRequestID()))
+    }
+
     // MARK: Private
 
     private func makeRequestID() -> Int {

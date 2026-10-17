@@ -3,6 +3,11 @@ import Foundation
 /// UserDefaults keys (shared by `@AppStorage` and the engine configuration).
 enum SettingsKeys {
     static let engineKind = "engineKind"
+    /// The user picked "Simulation" explicitly (v0.1.0 stored "mock" as default).
+    static let simulationChosen = "simulationChosen"
+    static let preset = "broadcastPreset"
+    /// Debug: WAV of the encoder input in ~/Library/Logs/Auracaster.
+    static let recordEncoderInput = "recordEncoderInput"
     static let transport = "transport"
     static let pythonPath = "pythonPath"
     static let helperOverridePath = "helperOverridePath"
