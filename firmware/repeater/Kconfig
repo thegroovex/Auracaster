@@ -1,0 +1,109 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Auracaster Repeater options. Override at build time, e.g.
+#   west build ... -- -DCONFIG_AURACAST_REPEATER_BROADCAST_CODE=\"geheim123\"
+
+menu "Auracaster Repeater"
+
+config AURACAST_REPEATER_SOURCE_NAME_PREFIX
+	string "Broadcast name prefix of the source to relay"
+	default "Auracaster"
+	help
+	  Only Auracast broadcasts whose Broadcast Name starts with this text
+	  are preferred. Empty: every Auracast broadcast matches and the
+	  strongest one is taken.
+
+config AURACAST_REPEATER_FALLBACK_STRONGEST
+	bool "Fall back to the strongest Auracast broadcast"
+	default y
+	help
+	  If no broadcast matches the name prefix, relay the strongest
+	  Auracast broadcast that is in range instead of waiting.
+
+config AURACAST_REPEATER_NAME
+	string "Broadcast name of the relay (empty: <source name><suffix>)"
+	default ""
+
+config AURACAST_REPEATER_NAME_SUFFIX
+	string "Suffix appended to the source name"
+	default " +"
+	help
+	  Also used to recognise other repeaters: broadcasts whose name ends
+	  with this suffix are never relayed (no relay chains / loops).
+
+config AURACAST_REPEATER_BROADCAST_CODE
+	string "Broadcast Code for encrypted sources (max. 16 bytes UTF-8)"
+	default ""
+	help
+	  Needed to decrypt an encrypted source; the relay is then encrypted
+	  with the same code. Same rules as the Auracaster app: plain UTF-8,
+	  zero padded to 16 bytes.
+
+config AURACAST_REPEATER_BROADCAST_ID
+	hex "Broadcast ID of the relay (0: derived from the chip ID)"
+	default 0x0
+	range 0x0 0xffffff
+
+config AURACAST_REPEATER_MAX_BIS
+	int "Maximum number of BIS (audio channels) relayed"
+	default 2
+	range 1 2
+
+config AURACAST_REPEATER_RTN
+	int "Retransmissions of the relay BIG"
+	default 0
+	range 0 4
+	help
+	  Every retransmission makes the relay's BIG event longer. Because
+	  the single radio also has to receive the source BIG, short relay
+	  events leave more room; see README (Grenzen).
+
+config AURACAST_REPEATER_MAX_LATENCY_MS
+	int "Max transport latency of the relay BIG (ms)"
+	default 10
+	range 5 29
+	help
+	  Kept below 30 ms so the Zephyr link layer uses one SDU per BIG event
+	  (ISO interval = SDU interval) and every SDU leaves immediately.
+
+config AURACAST_REPEATER_PRESENTATION_DELAY_US
+	int "Presentation Delay written into the relay BASE (us, 0: copy)"
+	default 0
+	range 0 100000
+
+config AURACAST_REPEATER_MAX_INFLIGHT
+	int "SDUs per BIS that may wait in the controller"
+	default 2
+	range 1 4
+	help
+	  Bounds the queue between the two unsynchronised BIGs; older data is
+	  dropped instead of letting latency grow from clock drift.
+
+config AURACAST_REPEATER_SCAN_WINDOW_MS
+	int "Time to collect candidates before choosing a source (ms)"
+	default 2000
+
+config AURACAST_REPEATER_LOSS_TIMEOUT_MS
+	int "No valid audio for this long counts as source lost (ms)"
+	default 3000
+
+config AURACAST_REPEATER_GRACE_MS
+	int "Keep the relay BIG alive this long while resyncing (ms)"
+	default 15000
+	help
+	  Receivers stay synced to the relay while the source is briefly
+	  gone; if the same stream comes back it is relayed again without
+	  the receivers noticing more than a dropout.
+
+config AURACAST_REPEATER_HW_WATCHDOG
+	bool "Hardware watchdog"
+	default y
+	select WATCHDOG
+
+config AURACAST_REPEATER_STATS_INTERVAL_S
+	int "Statistics log interval (s, 0: off)"
+	default 10
+
+endmenu
+
+source "Kconfig.zephyr"

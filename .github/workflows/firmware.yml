@@ -1,9 +1,10 @@
 name: Auracaster dongle firmware
 
 # Builds the Zephyr LE Audio broadcast controller (HCI H4 over USB CDC ACM)
-# for the nice!nano-compatible "Pro Micro nRF52840" dongle and uploads the
-# UF2 files for the three possible bootloader layouts as artifact
-# "auracaster-dongle-uf2". See firmware/README.md.
+# for the nice!nano-compatible "Pro Micro nRF52840" dongle and the standalone
+# Auracast repeater (firmware/repeater) and uploads the UF2 files for the three
+# possible bootloader layouts as artifact "auracaster-dongle-uf2".
+# See firmware/README.md and firmware/repeater/README.md.
 
 on:
   push:
@@ -33,19 +34,25 @@ env:
 
 jobs:
   build:
-    name: UF2 ${{ matrix.variant }}
+    name: UF2 ${{ matrix.app }} ${{ matrix.variant }}
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
+        # dongle: firmware/ (HCI controller for the Mac)
+        # repeater: firmware/repeater/ (standalone Auracast relay)
+        app: [ dongle, repeater ]
+        variant: [ s140v6-0x26000, s140v7-0x27000, nosd-0x1000 ]
         include:
           # S140 v6.1.1 (original nice!nano bootloader): app at 0x26000
-          - { variant: s140v6-0x26000, board: promicro_nrf52840/nrf52840/uf2, extra: '',                                 start: '0x26000' }
+          - { variant: s140v6-0x26000, board: promicro_nrf52840/nrf52840/uf2, overlay: '',             start: '0x26000' }
           # S140 v7.x bootloaders: app at 0x27000
-          - { variant: s140v7-0x27000, board: promicro_nrf52840/nrf52840/uf2, extra: '-DEXTRA_DTC_OVERLAY_FILE=sdv7.overlay', start: '0x27000' }
+          - { variant: s140v7-0x27000, board: promicro_nrf52840/nrf52840/uf2, overlay: 'sdv7.overlay', start: '0x27000' }
           # bootloader without SoftDevice ("SoftDevice: not found"): app at 0x1000
-          - { variant: nosd-0x1000,    board: promicro_nrf52840/nrf52840,     extra: '',                                 start: '0x1000' }
+          - { variant: nosd-0x1000,    board: promicro_nrf52840/nrf52840,     overlay: '',             start: '0x1000' }
+          - { app: dongle,   appdir: auracaster-fw }
+          - { app: repeater, appdir: auracaster-fw/repeater }
     steps:
       - uses: actions/checkout@v5
 
@@ -99,10 +106,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/ccache
-          key: ccache-fw-${{ matrix.variant }}-${{ hashFiles('firmware/west.yml', 'firmware/prj.conf', 'firmware/boards/**', 'firmware/*.overlay') }}-${{ github.run_id }}
+          key: ccache-fw-${{ matrix.app }}-${{ matrix.variant }}-${{ hashFiles('firmware/west.yml', 'firmware/prj.conf', 'firmware/boards/**', 'firmware/*.overlay', 'firmware/repeater/prj.conf', 'firmware/repeater/Kconfig', 'firmware/repeater/boards/**') }}-${{ github.run_id }}
           restore-keys: |
-            ccache-fw-${{ matrix.variant }}-${{ hashFiles('firmware/west.yml', 'firmware/prj.conf', 'firmware/boards/**', 'firmware/*.overlay') }}-
-            ccache-fw-${{ matrix.variant }}-
+            ccache-fw-${{ matrix.app }}-${{ matrix.variant }}-${{ hashFiles('firmware/west.yml', 'firmware/prj.conf', 'firmware/boards/**', 'firmware/*.overlay', 'firmware/repeater/prj.conf', 'firmware/repeater/Kconfig', 'firmware/repeater/boards/**') }}-
+            ccache-fw-${{ matrix.app }}-${{ matrix.variant }}-
 
       - name: Build
         run: |
@@ -110,7 +117,19 @@ jobs:
           export ZEPHYR_SDK_INSTALL_DIR="$HOME/zephyr-sdk-${SDK_VERSION}"
           export CCACHE_DIR="$HOME/.cache/ccache" CCACHE_MAXSIZE=300M CCACHE_BASEDIR="$WS" CCACHE_NOHASHDIR=1
           cd "$WS"
-          west build -p always -b ${{ matrix.board }} -d build/out auracaster-fw -- -DUSE_CCACHE=1 ${{ matrix.extra }} 2>&1 | tail -n 25
+          extra=""
+          [ -n "${{ matrix.overlay }}" ] && extra="-DEXTRA_DTC_OVERLAY_FILE=$WS/auracaster-fw/${{ matrix.overlay }}"
+          set +e
+          west build -p always -b ${{ matrix.board }} -d build/out ${{ matrix.appdir }} -- -DUSE_CCACHE=1 $extra > build.log 2>&1
+          rc=$?
+          set -e
+          if [ $rc -ne 0 ]; then
+            # surface compiler errors as annotations, then the log tail
+            { grep -E "(error|Error|ERROR)[: ]" build.log | grep -v "^--" | head -n 20 | while read -r l; do echo "::error title=${{ matrix.app }} ${{ matrix.variant }}::$l"; done; } || true
+            tail -n 60 build.log
+            exit $rc
+          fi
+          tail -n 25 build.log
           ccache -s | head -n 8 || true
 
       - name: Check and collect
@@ -119,19 +138,21 @@ jobs:
           cd "$WS"
           chk=auracaster-fw/scripts/uf2info.py
           dist="${GITHUB_WORKSPACE}/dist"; mkdir -p "$dist"
+          name="auracaster-${{ matrix.app }}-${{ matrix.variant }}"
+          info="$dist/info-${{ matrix.app }}-${{ matrix.variant }}.txt"
           python3 $chk build/out/zephyr/zephyr.uf2 --expect-start ${{ matrix.start }}
-          cp build/out/zephyr/zephyr.uf2 "$dist/auracaster-dongle-${{ matrix.variant }}.uf2"
-          [ "${{ matrix.variant }}" = s140v6-0x26000 ] && cp build/out/zephyr/zephyr.hex "$dist/auracaster-dongle-${{ matrix.variant }}.hex"
+          cp build/out/zephyr/zephyr.uf2 "$dist/$name.uf2"
+          [ "${{ matrix.variant }}" = s140v6-0x26000 ] && cp build/out/zephyr/zephyr.hex "$dist/$name.hex"
           {
-            echo "== ${{ matrix.variant }} =="
-            python3 $chk "$dist/auracaster-dongle-${{ matrix.variant }}.uf2"
-            grep -E '^CONFIG_(BT_CTLR_TX_PWR_DBM|BT_CTLR_ADV_ISO_STREAM_MAX|BT_CTLR_ISO_TX_BUFFERS|BT_CTLR_ISO_TX_BUFFER_SIZE|CDC_ACM_SERIAL_(VID|PID|PRODUCT_STRING))=' build/out/zephyr/.config || true
-          } > "$dist/info-${{ matrix.variant }}.txt"
-          echo "zephyr: $(cd zephyr && cat VERSION | tr '\n' ' ') sdk: ${SDK_VERSION}" >> "$dist/info-${{ matrix.variant }}.txt"
+            echo "== ${{ matrix.app }} ${{ matrix.variant }} =="
+            python3 $chk "$dist/$name.uf2"
+            grep -E '^CONFIG_(BT_CTLR_TX_PWR_DBM|BT_CTLR_ADV_ISO_STREAM_MAX|BT_CTLR_SYNC_ISO_STREAM_MAX|BT_CTLR_ISO_TX_BUFFERS|BT_CTLR_ISO_TX_BUFFER_SIZE|CDC_ACM_SERIAL_(VID|PID|PRODUCT_STRING)|AURACAST_REPEATER_[A-Z_]+)=' build/out/zephyr/.config || true
+          } > "$info"
+          echo "zephyr: $(cd zephyr && cat VERSION | tr '\n' ' ') sdk: ${SDK_VERSION}" >> "$info"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: uf2-${{ matrix.variant }}
+          name: uf2-${{ matrix.app }}-${{ matrix.variant }}
           path: dist/
           if-no-files-found: error
           retention-days: 3
@@ -150,15 +171,16 @@ jobs:
         run: |
           cd dist
           {
-            echo "Auracaster Dongle firmware"
+            echo "Auracaster Dongle + Repeater firmware"
             echo "commit:  ${GITHUB_SHA}"
             echo "board:   promicro_nrf52840 (nice!nano v2 compatible)"
-            echo "hci:     H4 over USB CDC ACM (Bumble: serial:/dev/cu.usbmodem...,resync)"
+            echo "dongle:  auracaster-dongle-*.uf2   - HCI H4 over USB CDC ACM for the Mac (Bumble: serial:/dev/cu.usbmodem...,resync)"
+            echo "repeater: auracaster-repeater-*.uf2 - standalone Auracast relay (USB power only), see firmware/repeater/README.md"
             echo
             echo "Which file? Open INFO_UF2.TXT on the bootloader drive:"
-            echo "  SoftDevice: S140 version 6.x.x -> auracaster-dongle-s140v6-0x26000.uf2"
-            echo "  SoftDevice: S140 version 7.x.x -> auracaster-dongle-s140v7-0x27000.uf2"
-            echo "  SoftDevice: not found          -> auracaster-dongle-nosd-0x1000.uf2"
+            echo "  SoftDevice: S140 version 6.x.x -> auracaster-<dongle|repeater>-s140v6-0x26000.uf2"
+            echo "  SoftDevice: S140 version 7.x.x -> auracaster-<dongle|repeater>-s140v7-0x27000.uf2"
+            echo "  SoftDevice: not found          -> auracaster-<dongle|repeater>-nosd-0x1000.uf2"
             echo
             cat info-*.txt
           } > BUILDINFO.txt
