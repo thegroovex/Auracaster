@@ -97,6 +97,7 @@ struct PairingSheet: View {
             Text("Andere Handys: unter „Audio-Freigabe“ / „Audiostream suchen“ ebenso.")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

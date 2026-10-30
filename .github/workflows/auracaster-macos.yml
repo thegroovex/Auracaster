@@ -205,7 +205,7 @@ jobs:
             for req in "$OUT"/request-*.txt; do
               [ -e "$req" ] || continue
               name=$(basename "$req" .txt); name=${name#request-}
-              wid=$(cat "$req")
+              wid=$(cat "$req" 2>/dev/null) || continue   # the app may remove it right now
               if [ ! -e "$OUT/ack-$name" ]; then
                 screencapture -x -l "$wid" "$OUT/window-$name.png" 2>>"$OUT/screencapture-errors.txt" || echo "screencapture failed: $name" >> "$OUT/screencapture-errors.txt"
                 touch "$OUT/ack-$name"

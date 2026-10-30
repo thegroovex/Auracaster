@@ -119,7 +119,8 @@ enum CapturePlanner {
 
     /// v0.1.4 (real test log v0.1.3): per-app volume/mixer and routing apps
     /// record and re-play audio; "FineTune" was in the mix for ~7 min before it
-    /// started recording and got excluded → echo. Excluded from the start now,
+    /// started recording and got excluded → echo (confirmed by the user: echo
+    /// gone as soon as FineTune was excluded). Excluded from the start now,
     /// matched against bundle ID, path and process name.
     static let audioRouterMarkers = [
         "finetune", "soundsource", "com.rogueamoeba", "arkaudiod", "loopback", "audio hijack", "audiohijack",

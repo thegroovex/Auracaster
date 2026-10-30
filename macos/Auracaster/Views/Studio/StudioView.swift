@@ -29,7 +29,7 @@ struct StudioView: View {
                             controls(compact: false)
                         }
                     } else {
-                        latencyReadout(size: 56)
+                        latencyReadout(size: 56, alignment: .leading)
                             .frame(maxWidth: .infinity, alignment: .leading)
                         controls(compact: true)
                     }
@@ -140,8 +140,8 @@ struct StudioView: View {
         }
     }
 
-    private func latencyReadout(size: CGFloat) -> some View {
-        VStack(spacing: 4) {
+    private func latencyReadout(size: CGFloat, alignment: HorizontalAlignment = .center) -> some View {
+        VStack(alignment: alignment, spacing: 4) {
             Text("\(model.latencyMilliseconds) ms")
                 .font(.system(size: size, weight: .bold, design: .rounded))
                 .lineLimit(1)

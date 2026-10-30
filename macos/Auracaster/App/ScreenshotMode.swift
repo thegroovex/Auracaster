@@ -110,7 +110,7 @@ enum ScreenshotExporter {
             await showcase(
                 Form { AdvancedLatencySection() }
                     .formStyle(.grouped)
-                    .frame(width: 680, height: 1180)
+                    .frame(width: 680, height: 1000)
                     .environment(model),
                 name: "settings-latency-\(suffix)", appearance: appearance, transparent: false,
                 directory: directory, note: note

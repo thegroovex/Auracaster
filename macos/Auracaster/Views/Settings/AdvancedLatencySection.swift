@@ -65,9 +65,7 @@ struct AdvancedLatencySection: View {
             ValueSlider(title: "Presentation Delay", value: $model.customParameters.presentationDelayMilliseconds,
                         range: LatencyParameters.presentationDelayRange, step: 1,
                         help: "Zeit, die Empfänger nach dem Funk-Zeitpunkt puffern, bevor sie abspielen (BAP).")
-            Stepper(value: $model.customParameters.retransmissions, in: LatencyParameters.retransmissionRange) {
-                LabeledContent("Wiederholungen (RTN)", value: "\(parameters.retransmissions)")
-            }
+            IntStepperRow(title: "Wiederholungen (RTN)", value: $model.customParameters.retransmissions, range: LatencyParameters.retransmissionRange)
             .help("Wie oft jedes Paket zusätzlich gesendet wird. Mehr = robuster, aber mehr Funkzeit.")
             ValueSlider(title: "Max. Transportlatenz", value: $model.customParameters.maxTransportLatencyMilliseconds,
                         range: LatencyParameters.transportLatencyRange, step: 1,
@@ -87,18 +85,10 @@ struct AdvancedLatencySection: View {
             Toggle("Explizite BIG-Werte (LE Create BIG Test)", isOn: $model.customParameters.explicitBIG)
                 .help("NSE/BN/IRC/PTO direkt vorgeben statt sie vom Controller aus RTN und Transportlatenz ableiten zu lassen. Der Zephyr-Controller senkt RTN sonst still, wenn das BIG-Event nicht ins ISO-Intervall passt.")
             if parameters.explicitBIG {
-                Stepper(value: $model.customParameters.nse, in: LatencyParameters.nseRange) {
-                    LabeledContent("NSE (Subevents)", value: "\(parameters.nse)")
-                }
-                Stepper(value: $model.customParameters.bn, in: LatencyParameters.bnRange) {
-                    LabeledContent("BN (SDUs pro Event)", value: "\(parameters.bn)")
-                }
-                Stepper(value: $model.customParameters.irc, in: LatencyParameters.ircRange) {
-                    LabeledContent("IRC (Wiederholungen + 1)", value: "\(parameters.irc)")
-                }
-                Stepper(value: $model.customParameters.pto, in: LatencyParameters.ptoRange) {
-                    LabeledContent("PTO (Vorab-Übertragung)", value: "\(parameters.pto)")
-                }
+                IntStepperRow(title: "NSE (Subevents)", value: $model.customParameters.nse, range: LatencyParameters.nseRange)
+                IntStepperRow(title: "BN (SDUs pro Event)", value: $model.customParameters.bn, range: LatencyParameters.bnRange)
+                IntStepperRow(title: "IRC (Wiederholungen + 1)", value: $model.customParameters.irc, range: LatencyParameters.ircRange)
+                IntStepperRow(title: "PTO (Vorab-Übertragung)", value: $model.customParameters.pto, range: LatencyParameters.ptoRange)
                 let check = parameters.clamped()
                 if !check.adjustments.isEmpty {
                     Text("Wird beim Senden angepasst: " + check.adjustments.joined(separator: " · "))
@@ -221,5 +211,24 @@ struct ValueSlider: View {
             }
         }
         .help(help)
+    }
+}
+
+/// "Title ……… 3 [−|+]" – value right-aligned next to the stepper.
+struct IntStepperRow: View {
+    var title: String
+    @Binding var value: Int
+    var range: ClosedRange<Int>
+
+    var body: some View {
+        LabeledContent(title) {
+            HStack(spacing: 8) {
+                Text("\(value)")
+                    .monospacedDigit()
+                    .frame(minWidth: 24, alignment: .trailing)
+                Stepper("", value: $value, in: range)
+                    .labelsHidden()
+            }
+        }
     }
 }
