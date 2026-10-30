@@ -115,14 +115,12 @@ enum ScreenshotExporter {
                 name: "settings-latency-\(suffix)", appearance: appearance, transparent: false,
                 directory: directory, note: note
             )
-            // v0.1.4: pairing sheet of a private broadcast
-            model.isPrivateBroadcast = true
+            // v0.1.4: pairing sheet of a private broadcast (no switch toggling while live)
             await showcase(
                 PairingSheet(isShowcase: true).environment(model),
                 name: "pairing-\(suffix)", appearance: appearance, transparent: false,
                 directory: directory, note: note
             )
-            model.isPrivateBroadcast = false
 
             // Menu bar panel, onboarding and update sheet in their own windows.
             await showcase(

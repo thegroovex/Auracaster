@@ -103,7 +103,7 @@ struct PairingSheet: View {
 
     @ViewBuilder
     private func qrCode(showCode: Bool) -> some View {
-        let uri = model.joinURI
+        let uri = pairingURI
         ZStack {
             if let image = QRCodeRenderer.image(for: uri.string) {
                 Image(decorative: image, scale: 1)
@@ -126,6 +126,13 @@ struct PairingSheet: View {
         .contextMenu {
             Button("Broadcast-URI kopieren") { copy(uri.string, key: "uri") }
         }
+    }
+
+    /// Always with the code – this sheet is the pairing of the private broadcast.
+    private var pairingURI: BroadcastURI {
+        var uri = model.joinURI
+        uri.broadcastCode = model.broadcastCode
+        return uri
     }
 
     private func field(

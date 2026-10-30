@@ -131,6 +131,7 @@ final class AppModel {
     @ObservationIgnored private var pcmTransport: FifoPCMTransport?
     @ObservationIgnored private var expectingTermination = false
     @ObservationIgnored private var isRestarting = false
+    @ObservationIgnored private var restartTask: Task<Void, Never>?
     private let isPreview: Bool
 
     /// Engine used when nothing was chosen explicitly: the real one whenever the
@@ -488,17 +489,22 @@ final class AppModel {
 
     /// Preset or source changed while live: restart with the new settings.
     private func restartIfLive() {
-        guard isLive, !isTransitioning else { return }
+        // v0.1.4: coalesce – several changes in a row (switch + password, preset +
+        // values) give ONE restart that picks up the latest values when it starts.
+        guard isLive, !isTransitioning, restartTask == nil else { return }
         startTask?.cancel()
         startTask = nil
-        Task {
+        restartTask = Task {
             teardownAudio()
             try? await engine.stop()
-            startTask = Task {
+            let task = Task {
                 isRestarting = true
                 defer { isRestarting = false }
                 await startBroadcast()
             }
+            startTask = task
+            restartTask = nil
+            await task.value
         }
     }
 
