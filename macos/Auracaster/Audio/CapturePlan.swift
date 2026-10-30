@@ -74,6 +74,12 @@ enum CapturePlanner {
         case virtualDriver = "Treiber/Loopback"
         /// background process recording and playing at once (re-plays what it records)
         case passThrough = "nimmt auf + spielt ab"
+        /// known audio router / per-app mixer (v0.1.4: excluded from the start)
+        case audioRouter = "Audio-Router/Mixer"
+        /// excluded earlier in this capture session – stays out (no flapping, v0.1.4)
+        case sticky = "bleibt ausgeschlossen"
+        /// listed by the user in the settings
+        case userList = "Einstellungen"
     }
 
     struct Excluded: Equatable, Sendable {
@@ -111,6 +117,34 @@ enum CapturePlanner {
         "com.apple.audio.core-audio-driver-service", "core audio driver",
     ]
 
+    /// v0.1.4 (real test log v0.1.3): per-app volume/mixer and routing apps
+    /// record and re-play audio; "FineTune" was in the mix for ~7 min before it
+    /// started recording and got excluded → echo. Excluded from the start now,
+    /// matched against bundle ID, path and process name.
+    static let audioRouterMarkers = [
+        "finetune", "soundsource", "com.rogueamoeba", "arkaudiod", "loopback", "audio hijack", "audiohijack",
+        "blackhole", "existential.audio", "eqmac", "bitgapp", "background music", "backgroundmusic",
+        "boom 3d", "boom3d", "globaldelight", "airfoil", "sonarworks", "soundid", "audiorelay",
+        "soundflower", "nicefuse", "volume mixer", "volumemixer", "mixer for mac",
+    ]
+
+    /// "FineTune, com.example.app" → ["finetune", "com.example.app"] (settings list).
+    static func userMarkers(from text: String?) -> [String] {
+        (text ?? "").split(whereSeparator: { $0 == "," || $0 == "\n" || $0 == ";" })
+            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+            .filter { $0.count >= 3 }
+    }
+
+    static func matches(_ process: TapProcess, markers: [String]) -> Bool {
+        let haystack = [process.bundleID, process.path, process.name].compactMap { $0?.lowercased() }.joined(separator: " ")
+        guard !haystack.isEmpty else { return false }
+        return markers.contains { haystack.contains($0) }
+    }
+
+    static func isAudioRouter(_ process: TapProcess) -> Bool {
+        matches(process, markers: audioRouterMarkers)
+    }
+
     static func isVirtualDriverHelper(_ process: TapProcess) -> Bool {
         let haystack = [process.bundleID, process.path].compactMap { $0?.lowercased() }.joined(separator: " ")
         guard !haystack.isEmpty else { return false }
@@ -132,7 +166,10 @@ enum CapturePlanner {
     ///   * helpers of virtual audio drivers / loopback tools (markers),
     ///   * background processes (not a regular app, nor attributed to one)
     ///     that record AND play at the same time – they pass audio through.
-    static func systemAudioMix(ownPID: pid_t, extraExcluded: [pid_t], processes: [TapProcess]) -> SystemMix {
+    static func systemAudioMix(
+        ownPID: pid_t, extraExcluded: [pid_t], processes: [TapProcess],
+        stickyExcluded: Set<pid_t> = [], userMarkers: [String] = []
+    ) -> SystemMix {
         var mix = SystemMix(included: [], excluded: [])
         var seen = Set<pid_t>()
         for process in processes where !seen.contains(process.pid) {
@@ -144,8 +181,14 @@ enum CapturePlanner {
                 reason = .requested
             } else if isVirtualDriverHelper(process) {
                 reason = .virtualDriver
+            } else if isAudioRouter(process) {
+                reason = .audioRouter
+            } else if !userMarkers.isEmpty && matches(process, markers: userMarkers) {
+                reason = .userList
             } else if process.isRunningInput && process.isRunningOutput && !process.ownerIsRegularApp {
                 reason = .passThrough
+            } else if stickyExcluded.contains(process.pid) {
+                reason = .sticky
             } else {
                 reason = nil
             }
@@ -161,9 +204,10 @@ enum CapturePlanner {
     /// System audio plan: a process mixdown (v0.1.3). Falls back to ONE global
     /// tap on the default output device only when no process is known yet.
     static func systemAudio(
-        ownPID: pid_t, extraExcluded: [pid_t], processes: [TapProcess], defaultOutput: DeviceInfo?
+        ownPID: pid_t, extraExcluded: [pid_t], processes: [TapProcess], defaultOutput: DeviceInfo?,
+        userMarkers: [String] = []
     ) -> TapPlan {
-        let mix = systemAudioMix(ownPID: ownPID, extraExcluded: extraExcluded, processes: processes)
+        let mix = systemAudioMix(ownPID: ownPID, extraExcluded: extraExcluded, processes: processes, userMarkers: userMarkers)
         if !mix.included.isEmpty {
             return TapPlan(kind: .systemMix(mix.includedPIDs), excludedPIDs: mix.excludedPIDs, deviceUID: nil, stream: nil)
         }

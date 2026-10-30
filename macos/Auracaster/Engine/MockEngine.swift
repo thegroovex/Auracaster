@@ -8,7 +8,7 @@ actor MockEngine: BroadcastEngine {
 
     private var launched = false
     private var levelTask: Task<Void, Never>?
-    private var preset: BroadcastPreset = .default
+    private var parameters: LatencyParameters = .standard
     private var broadcastID = 0
 
     init() {
@@ -29,11 +29,20 @@ actor MockEngine: BroadcastEngine {
 
     func start(_ request: BroadcastRequest) async throws {
         try await launch()
-        preset = request.preset
+        let parameters = request.parameters ?? request.preset.parameters
+        self.parameters = parameters
         broadcastID = request.broadcastID == 0 ? Int.random(in: 1...0xFFFFFF) : request.broadcastID
         continuation.yield(.status(status(.starting)))
         try? await Task.sleep(for: .milliseconds(350))
         continuation.yield(.status(status(.live)))
+        // Same shape as the helper's BIG line (target vs. what a controller picks).
+        let nse = parameters.retransmissions + 1
+        continuation.yield(.log(
+            "[info] BIG Soll: RTN \(parameters.retransmissions), max. Transportlatenz \(parameters.maxTransportLatencyMilliseconds) ms, "
+            + "PHY \(parameters.phy.rawValue), \(parameters.packing.rawValue), PD \(parameters.presentationDelayMilliseconds) ms | "
+            + "Ist: NSE \(nse), BN 1, PTO 0, IRC \(nse), ISO-Intervall \(parameters.frameDurationMilliseconds) ms (Simulation)"
+            + (request.broadcastCode != nil ? ", verschlüsselt" : "")
+        ))
         startLevels()
     }
 
@@ -78,6 +87,10 @@ actor MockEngine: BroadcastEngine {
         )))
     }
 
+    func setJitterBuffer(milliseconds: Int) async throws {
+        parameters.jitterBufferMilliseconds = milliseconds
+    }
+
     func shutdown() async {
         levelTask?.cancel()
         levelTask = nil
@@ -93,7 +106,7 @@ actor MockEngine: BroadcastEngine {
             controllerConnected: true,
             controllerAddress: "F0:F1:F2:F3:F4:F5",
             supportsIsoBroadcaster: true,
-            estimatedLatencyMilliseconds: preset.estimatedLatencyMilliseconds,
+            estimatedLatencyMilliseconds: parameters.radioLatencyMilliseconds,
             framesSent: 0,
             uptimeSeconds: 0,
             broadcastID: state == .idle ? nil : broadcastID,

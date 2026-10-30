@@ -121,8 +121,13 @@ final class ProcessTapCapture: AudioCapture {
     /// "1 Eingangs-Stream · IO-Puffer 1 · gelesen: Tap-Puffer 1"
     var aggregateSummary: String {
         let seen = tapBuffers.observedBuffers.load(ordering: .relaxed)
-        return "\(aggregateInputStreams) Eingangs-Stream(s) im Aggregat · \(seen) Puffer pro IO-Zyklus · Tap-Kanäle \(tapChannels)"
+        // v0.1.4: 0 is not a counter bug – no IO cycle had run yet when the line was logged.
+        let buffers = seen > 0 ? "\(seen) Puffer pro IO-Zyklus" : "noch kein IO-Zyklus"
+        return "\(aggregateInputStreams) Eingangs-Stream(s) im Aggregat · \(buffers) · Tap-Kanäle \(tapChannels)"
     }
+
+    /// The IOProc has delivered at least one buffer list.
+    var hasSeenIOCycle: Bool { tapBuffers.observedBuffers.load(ordering: .relaxed) > 0 }
 
     @discardableResult
     func prepare(target: CaptureTarget) throws -> AudioStreamBasicDescription {
@@ -137,11 +142,15 @@ final class ProcessTapCapture: AudioCapture {
                 let ownPID = ProcessInfo.processInfo.processIdentifier
                 let snapshot = Self.processSnapshot()
                 let processes = snapshot.map(\.process)
+                let userMarkers = CapturePlanner.userMarkers(
+                    from: UserDefaults.standard.string(forKey: SettingsKeys.excludedAudioApps))
                 let plan = CapturePlanner.systemAudio(
-                    ownPID: ownPID, extraExcluded: excludedPIDs, processes: processes, defaultOutput: output
+                    ownPID: ownPID, extraExcluded: excludedPIDs, processes: processes, defaultOutput: output,
+                    userMarkers: userMarkers
                 )
                 lastPlan = plan
-                let mix = CapturePlanner.systemAudioMix(ownPID: ownPID, extraExcluded: excludedPIDs, processes: processes)
+                let mix = CapturePlanner.systemAudioMix(ownPID: ownPID, extraExcluded: excludedPIDs, processes: processes,
+                                                        userMarkers: userMarkers)
                 switch plan.kind {
                 case .systemMix(let pids):
                     let objects = snapshot.filter { pids.contains($0.process.pid) }.map(\.object)
@@ -150,7 +159,9 @@ final class ProcessTapCapture: AudioCapture {
                     try createTap(description, clockOutput: output)
                     let updater = SystemMixUpdater(
                         tapID: tapID, uuid: description.uuid, ownPID: ownPID, extraExcluded: excludedPIDs,
-                        current: pids, onChange: onSystemMixChange
+                        current: pids, userMarkers: userMarkers,
+                        sticky: Set(mix.excluded.filter { $0.reason == .passThrough }.map(\.process.pid)),
+                        onChange: onSystemMixChange
                     )
                     updater.start()
                     mixUpdater = updater
@@ -353,20 +364,26 @@ final class SystemMixUpdater: @unchecked Sendable {
     private let uuid: UUID
     private let ownPID: pid_t
     private let extraExcluded: [pid_t]
+    private let userMarkers: [String]
     private let onChange: (@Sendable (String) -> Void)?
     // queue-confined state
     private var current: [pid_t]
+    /// Processes once excluded as pass-through stay out for this session (v0.1.4: no flapping).
+    private var sticky: Set<pid_t>
     private var names: [pid_t: String] = [:]
     private var stopped = false
     private var timer: DispatchSourceTimer?
     private var listener: AudioObjectPropertyListenerBlock?
 
     init(tapID: AudioObjectID, uuid: UUID, ownPID: pid_t, extraExcluded: [pid_t], current: [pid_t],
+         userMarkers: [String] = [], sticky: Set<pid_t> = [],
          onChange: (@Sendable (String) -> Void)?) {
         self.tapID = tapID
         self.uuid = uuid
         self.ownPID = ownPID
         self.extraExcluded = extraExcluded
+        self.userMarkers = userMarkers
+        self.sticky = sticky
         self.current = current
         self.onChange = onChange
     }
@@ -399,7 +416,9 @@ final class SystemMixUpdater: @unchecked Sendable {
         guard !stopped else { return }
         let snapshot = ProcessTapCapture.processSnapshot()
         let mix = CapturePlanner.systemAudioMix(ownPID: ownPID, extraExcluded: extraExcluded,
-                                                processes: snapshot.map(\.process))
+                                                processes: snapshot.map(\.process),
+                                                stickyExcluded: sticky, userMarkers: userMarkers)
+        for entry in mix.excluded where entry.reason == .passThrough { sticky.insert(entry.process.pid) }
         for entry in snapshot { names[entry.process.pid] = entry.process.displayName }
         let pids = mix.includedPIDs
         guard !pids.isEmpty, Set(pids) != Set(current) else { return }

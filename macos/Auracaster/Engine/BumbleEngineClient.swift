@@ -192,6 +192,10 @@ actor BumbleEngineClient: BroadcastEngine {
 
     // MARK: Private
 
+    func setJitterBuffer(milliseconds: Int) async throws {
+        try send(HelperProtocol.Command(cmd: "set_jitter", id: makeRequestID(), jitterMs: milliseconds))
+    }
+
     private func makeRequestID() -> Int {
         defer { nextRequestID += 1 }
         return nextRequestID

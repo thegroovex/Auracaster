@@ -13,11 +13,16 @@ struct OnAirButton: View {
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: model.isLive ? "dot.radiowaves.left.and.right" : "play.fill")
+                    .symbolRenderingMode(.monochrome)
                     .symbolEffect(.variableColor.iterative, isActive: model.isLive)
                 Text(title)
                     .fontWeight(.semibold)
+                    .lineLimit(1)
             }
+            // v0.1.4: white on the red/accent glass (red-on-red had too little contrast)
+            .foregroundStyle(.white)
             .padding(.horizontal, 4)
+            .fixedSize()
         }
         .buttonStyle(.glassProminent)
         .tint(model.isLive ? .red : .accentColor)
@@ -57,7 +62,8 @@ struct LatencyPill: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
-        .help("Geschätzte Ende-zu-Ende-Latenz (LC3-Frame + Presentation Delay)")
+        .fixedSize()
+        .help("Geschätzte Funk-Latenz (LC3-Frame + Presentation Delay)")
 
         switch style {
         case .plain:
@@ -74,14 +80,20 @@ struct DongleStatusView: View {
     var status: DongleStatus
 
     var body: some View {
-        Label {
-            Text(status.title)
-        } icon: {
+        // v0.1.4: explicit HStack + padding + fixedSize – the toolbar's Label
+        // clipped the connector icon on the left and the text on the right.
+        HStack(spacing: 6) {
             Image(systemName: status.symbol)
+                .symbolRenderingMode(.monochrome)
                 .foregroundStyle(color)
+                .frame(minWidth: 16)
+            Text(status.title)
+                .lineLimit(1)
         }
-        .labelStyle(.titleAndIcon)
-        .help(status.detail)
+        .padding(.horizontal, 8)
+        .fixedSize()
+        .help(status.title + " – " + status.detail)
+        .accessibilityElement(children: .combine)
     }
 
     private var color: Color {

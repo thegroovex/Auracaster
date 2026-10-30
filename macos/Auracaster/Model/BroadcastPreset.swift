@@ -10,13 +10,18 @@ import Foundation
 /// 10 ms presentation delay are outside what BAP requires of broadcast sinks
 /// and may be silent on some receivers → "Ultra-Low" is experimental.
 /// BAP mandates 16_2 and 24_2 (10 ms) for every broadcast sink → "Kompatibel".
+/// v0.1.4: "Eigenes" – every value adjustable in Einstellungen → Erweitert · Latenz.
 enum BroadcastPreset: String, CaseIterable, Identifiable, Codable, Sendable {
     case compatible
     case balanced
     case highQuality
     case ultraLow
+    case custom
 
     var id: String { rawValue }
+
+    /// The fixed presets ("Eigenes" can copy their values).
+    static let builtIn: [BroadcastPreset] = [.compatible, .balanced, .highQuality, .ultraLow]
 
     /// Default for new installations. v0.1.2: back to "Ausgewogen" – user test of
     /// v0.1.1 showed "Hohe Qualität" (48_4, RTN 4) buffering while 48_2/24_2 played.
@@ -28,6 +33,7 @@ enum BroadcastPreset: String, CaseIterable, Identifiable, Codable, Sendable {
         case .balanced: "Ausgewogen"
         case .highQuality: "Hohe Qualität"
         case .ultraLow: "Ultra-Low β"
+        case .custom: "Eigenes"
         }
     }
 
@@ -37,95 +43,87 @@ enum BroadcastPreset: String, CaseIterable, Identifiable, Codable, Sendable {
         case .balanced: "48_2 · 48 kHz · 10 ms · 25 ms Puffer – empfohlen"
         case .highQuality: "48_4 · 48 kHz · 10 ms · 40 ms Puffer – höchste Bitrate"
         case .ultraLow: "Experimentell: 7,5-ms-Frames · 20 ms Puffer · 3 Wiederholungen – mehr Reserve für den Funkempfang (vorher 10 ms: Knackser/Puffern), nicht jeder Empfänger spielt 7,5 ms ab"
+        case .custom: "Eigene Werte (Einstellungen → Erweitert · Latenz): " + parameters.summary
         }
     }
 
-    var isExperimental: Bool { self == .ultraLow }
+    var isExperimental: Bool { self == .ultraLow || self == .custom }
 
-    /// LC3 frame duration in microseconds (7 500 or 10 000).
-    var frameDurationMicroseconds: Int {
+    /// All values of this preset. Built-in presets use the global "Stabilität"
+    /// buffer and "Mono senden" switch; "Eigenes" carries its own.
+    var parameters: LatencyParameters {
+        if self == .custom { return CustomPresetStore.load() }
+        let defaults = UserDefaults.standard
+        var p = builtInParameters(
+            jitterMs: StabilityBuffer.current.rawValue,
+            mono: defaults.bool(forKey: SettingsKeys.monoBroadcast)
+        )
+        // v0.1.4: quality override for every built-in preset (0 = preset default)
+        let override = defaults.integer(forKey: SettingsKeys.bitrateOverride)
+        if override > 0 { p.bitrate = override }
+        return p.clamped().parameters
+    }
+
+    /// Values of a built-in preset (for .custom: the stored values).
+    func builtInParameters(jitterMs: Int, mono: Bool) -> LatencyParameters {
+        var p = LatencyParameters(jitterBufferMilliseconds: jitterMs, mono: mono)
         switch self {
-        case .ultraLow: 7_500
-        case .compatible, .balanced, .highQuality: 10_000
+        case .compatible:
+            p.sampleRate = 24_000; p.bitrate = 48_000           // 24_2: 60 bytes / 10 ms
+            p.presentationDelayMilliseconds = 40; p.retransmissions = 2; p.maxTransportLatencyMilliseconds = 10
+        case .balanced:
+            p.sampleRate = 48_000; p.bitrate = 80_000           // 48_2: 100 bytes / 10 ms
+            p.presentationDelayMilliseconds = 25; p.retransmissions = 2; p.maxTransportLatencyMilliseconds = 20
+        case .highQuality:
+            p.sampleRate = 48_000; p.bitrate = 96_000           // 48_4: 120 bytes / 10 ms
+            // v0.1.1 used RTN 4 / 65 ms: 2 BIS × 5 transmissions × 120 B did not fit the
+            // nRF52840's airtime next to EA/PA (stalled completions, buffering).
+            p.presentationDelayMilliseconds = 40; p.retransmissions = 2; p.maxTransportLatencyMilliseconds = 20
+            p.packing = .interleaved
+        case .ultraLow:
+            p.frameDurationMicroseconds = 7_500
+            p.sampleRate = 48_000; p.bitrate = 80_000           // 48_1 style: 75 bytes / 7.5 ms
+            // v0.1.3: PD 20 ms (10 ms buffered on the receiver), RTN 3 and 20 ms
+            // transport latency so the controller may use PTO ≥ 1 / more subevents.
+            p.presentationDelayMilliseconds = 20; p.retransmissions = 3; p.maxTransportLatencyMilliseconds = 20
+        case .custom:
+            return CustomPresetStore.load()
         }
+        return p
     }
 
-    /// LC3 codec sample rate (capture stays at 48 kHz, liblc3 downsamples).
-    var sampleRate: Int {
-        switch self {
-        case .compatible: 24_000
-        case .balanced, .highQuality, .ultraLow: 48_000
-        }
-    }
+    var frameDurationMicroseconds: Int { parameters.frameDurationMicroseconds }
+    var sampleRate: Int { parameters.sampleRate }
+    var bitrate: Int { parameters.bitrate }
+    var presentationDelayMicroseconds: Int { parameters.presentationDelayMilliseconds * 1000 }
+    var retransmissions: Int { parameters.retransmissions }
+    var maxTransportLatencyMilliseconds: Int { parameters.maxTransportLatencyMilliseconds }
+    var packing: String { parameters.packing.rawValue }
+    var frameDurationMilliseconds: Double { parameters.frameDurationMilliseconds }
 
-    /// LC3 bitrate per channel in bit/s.
-    var bitrate: Int {
-        switch self {
-        case .compatible: 48_000    // 24_2: 60 bytes / 10 ms
-        case .balanced: 80_000      // 48_2: 100 bytes / 10 ms
-        case .highQuality: 96_000   // 48_4: 120 bytes / 10 ms
-        case .ultraLow: 80_000      // 48_1 style: 75 bytes / 7.5 ms
-        }
-    }
-
-    /// BAP presentation delay in microseconds.
-    var presentationDelayMicroseconds: Int {
-        switch self {
-        case .compatible: 40_000
-        case .balanced: 25_000
-        case .highQuality: 40_000
-        // v0.1.3: was 10 ms. Host and dongle delivered 100 % (266.7 SDU/s) and the
-        // receiver still buffered → no headroom on the receiving side. 20 ms gives
-        // the earbuds time for the retransmissions; still the lowest latency preset.
-        case .ultraLow: 20_000
-        }
-    }
-
-    /// Number of retransmissions per BIS.
-    var retransmissions: Int {
-        switch self {
-        case .compatible: 2
-        case .balanced: 2
-        // v0.1.1 used 4: 2 BIS × 5 transmissions × 120 B did not fit the
-        // nRF52840's airtime next to EA/PA (stalled completions, buffering).
-        case .highQuality: 2
-        // v0.1.3: 3 (controller chose NSE 3 / PTO 0 with RTN 2 + 10 ms latency).
-        // 75-byte SDUs: 2 BIS × 4 subevents still fit the 7.5 ms ISO interval.
-        case .ultraLow: 3
-        }
-    }
-
-    /// Max transport latency in ms (HCI LE Create BIG).
-    var maxTransportLatencyMilliseconds: Int {
-        switch self {
-        case .compatible: 10
-        case .balanced: 20
-        case .highQuality: 20 // was 65 (ISO interval 50 ms, BN 5 – bursty)
-        // v0.1.3: 20 (was 10) so the controller may use pre-transmission (PTO ≥ 1)
-        // and more subevents instead of NSE 3 / PTO 0.
-        case .ultraLow: 20
-        }
-    }
-
-    /// BIS packing in the BIG (interleaved spreads the subevents of both BIS).
-    var packing: String {
-        self == .highQuality ? "interleaved" : "sequential"
-    }
-
-    var frameDurationMilliseconds: Double { Double(frameDurationMicroseconds) / 1000 }
-
-    /// Rounded end-to-end latency estimate in milliseconds.
-    var estimatedLatencyMilliseconds: Int {
-        Int((Double(frameDurationMicroseconds + presentationDelayMicroseconds) / 1000).rounded(.up))
-    }
+    /// Rounded radio latency estimate in milliseconds (frame + presentation delay).
+    var estimatedLatencyMilliseconds: Int { parameters.radioLatencyMilliseconds }
 
     /// LC3 octets per codec frame and channel.
-    var octetsPerFrame: Int { bitrate * frameDurationMicroseconds / 8_000_000 }
+    var octetsPerFrame: Int { parameters.octetsPerFrame }
 
     /// e.g. "LC3 · 48 kHz · 7,5 ms"
-    var codecSummary: String {
-        let frame = frameDurationMilliseconds.formatted(.number.precision(.fractionLength(0...1)))
-        return "LC3 · \(sampleRate / 1000) kHz · \(frame) ms"
+    var codecSummary: String { parameters.codecSummary }
+}
+
+/// Persistence of the preset "Eigenes" (UserDefaults, JSON).
+enum CustomPresetStore {
+    static func load(from defaults: UserDefaults = .standard) -> LatencyParameters {
+        guard let data = defaults.data(forKey: SettingsKeys.customPreset),
+              let stored = try? JSONDecoder().decode(LatencyParameters.self, from: data)
+        else { return .standard }
+        return stored.clamped().parameters
+    }
+
+    static func save(_ parameters: LatencyParameters, to defaults: UserDefaults = .standard) {
+        if let data = try? JSONEncoder().encode(parameters.clamped().parameters) {
+            defaults.set(data, forKey: SettingsKeys.customPreset)
+        }
     }
 }
 

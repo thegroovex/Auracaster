@@ -14,6 +14,7 @@ enum HelperProtocol {
         var audio: AudioPayload?
         var preset: PresetPayload?
         var duration: Double?
+        var jitterMs: Int?
     }
 
     struct BroadcastPayload: Encodable, Sendable {
@@ -31,7 +32,7 @@ enum HelperProtocol {
         var recordPath: String?
     }
 
-    struct PresetPayload: Encodable, Sendable {
+    struct PresetPayload: Encodable, Sendable, Equatable {
         var frameDurationUs: Int
         var bitrate: Int
         var presentationDelayUs: Int
@@ -40,16 +41,35 @@ enum HelperProtocol {
         var sampleRateHz: Int
         var packing: String
         var jitterMs: Int
+        var phy: String
+        var custom: Bool
+        var bigTest: Bool
+        var nse: Int
+        var bn: Int
+        var irc: Int
+        var pto: Int
 
-        init(_ preset: BroadcastPreset, jitterMs: Int = StabilityBuffer.current.rawValue) {
-            frameDurationUs = preset.frameDurationMicroseconds
-            bitrate = preset.bitrate
-            presentationDelayUs = preset.presentationDelayMicroseconds
-            rtn = preset.retransmissions
-            maxTransportLatencyMs = preset.maxTransportLatencyMilliseconds
-            sampleRateHz = preset.sampleRate
-            packing = preset.packing
-            self.jitterMs = jitterMs
+        init(_ preset: BroadcastPreset) {
+            self.init(preset.parameters, custom: preset == .custom)
+        }
+
+        init(_ parameters: LatencyParameters, custom: Bool) {
+            let p = parameters.clamped().parameters
+            frameDurationUs = p.frameDurationMicroseconds
+            bitrate = p.bitrate
+            presentationDelayUs = p.presentationDelayMilliseconds * 1000
+            rtn = p.retransmissions
+            maxTransportLatencyMs = p.maxTransportLatencyMilliseconds
+            sampleRateHz = p.sampleRate
+            packing = p.packing.rawValue
+            jitterMs = p.jitterBufferMilliseconds
+            phy = p.phy.rawValue
+            self.custom = custom
+            bigTest = p.explicitBIG
+            nse = p.nse
+            bn = p.bn
+            irc = p.irc
+            pto = p.pto
         }
     }
 
@@ -66,7 +86,7 @@ enum HelperProtocol {
                 public: request.isPublic
             ),
             audio: AudioPayload(input: request.audioInput, format: request.audioFormat, recordPath: request.recordPath),
-            preset: PresetPayload(request.preset)
+            preset: PresetPayload(request.parameters ?? request.preset.parameters, custom: request.preset == .custom)
         )
     }
 
@@ -124,6 +144,7 @@ enum HelperProtocol {
         var slipsDropped: Int?
         var slipsInserted: Int?
         var bufferMs: Double?
+        var jitterTargetMs: Int?
         var encodeMsAvg: Double?
         var encodeMsMax: Double?
         var loopMsMax: Double?
@@ -139,6 +160,15 @@ enum HelperProtocol {
         var bigPto: Int?
         var bigIsoIntervalMs: Double?
         var bigPacking: String?
+        var bigPhy: String?
+        var bigTransportLatencyUs: Double?
+        var bigEncrypted: Bool?
+        var bigReqRtn: Int?
+        var bigReqLatencyMs: Int?
+        var bigReqPhy: String?
+        var bigReqPacking: String?
+        var bigReqPdMs: Double?
+        var bigFallback: Bool?
         // controller_info
         var connected: Bool?
         var hciVersion: String?
@@ -259,8 +289,17 @@ enum HelperProtocol {
                 bigInfo: message.bigNse.map { nse in
                     "NSE \(nse) · BN \(message.bigBn ?? 0) · IRC \(message.bigIrc ?? 0) · PTO \(message.bigPto ?? 0)"
                         + (message.bigIsoIntervalMs.map { String(format: " · ISO %.2f ms", $0) } ?? "")
+                        + (message.bigTransportLatencyUs.map { String(format: " · Transport %.1f ms", $0 / 1000) } ?? "")
+                        + (message.bigPhy.map { " · \($0)" } ?? "")
                         + (message.bigPacking.map { " · \($0)" } ?? "")
+                        + (message.bigEncrypted == true ? " · verschlüsselt" : "")
                 },
+                bigRequested: message.bigReqRtn.map { rtn in
+                    "RTN \(rtn) · Transport ≤ \(message.bigReqLatencyMs ?? 0) ms · \(message.bigReqPhy ?? "?") · \(message.bigReqPacking ?? "?")"
+                        + (message.bigReqPdMs.map { String(format: " · PD %.0f ms", $0) } ?? "")
+                },
+                bigFallback: message.bigFallback ?? false,
+                jitterTargetMilliseconds: message.jitterTargetMs,
                 flushes: message.flushes ?? 0,
                 stalls: message.stalls ?? 0,
                 radioWaitMillisecondsMax: message.radioWaitMsMax ?? 0

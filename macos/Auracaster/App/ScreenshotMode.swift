@@ -96,6 +96,34 @@ enum ScreenshotExporter {
                 await capture(window: window, name: "\(name)-\(suffix)", directory: directory, note: note)
             }
 
+            // v0.1.4 layout check: Broadcasts view + toolbar at the minimum window size
+            // (sidebar must keep its icons, nothing may run out on the right).
+            ScreenshotDirector.shared.sidebarItem = .broadcasts
+            window.setContentSize(NSSize(width: 860, height: 560))
+            try? await Task.sleep(for: .seconds(1.2))
+            await capture(window: window, name: "studio-min-\(suffix)", directory: directory, note: note)
+            window.setContentSize(NSSize(width: 1180, height: 740))
+            window.center()
+            try? await Task.sleep(for: .seconds(0.6))
+
+            // v0.1.4: "Erweitert · Qualität/Latenz" (preset "Eigenes") as its own window
+            await showcase(
+                Form { AdvancedLatencySection() }
+                    .formStyle(.grouped)
+                    .frame(width: 680, height: 1180)
+                    .environment(model),
+                name: "settings-latency-\(suffix)", appearance: appearance, transparent: false,
+                directory: directory, note: note
+            )
+            // v0.1.4: pairing sheet of a private broadcast
+            model.isPrivateBroadcast = true
+            await showcase(
+                PairingSheet(isShowcase: true).environment(model),
+                name: "pairing-\(suffix)", appearance: appearance, transparent: false,
+                directory: directory, note: note
+            )
+            model.isPrivateBroadcast = false
+
             // Menu bar panel, onboarding and update sheet in their own windows.
             await showcase(
                 MenuBarPanel(drawsWindowBackground: true).environment(model).environment(updater),

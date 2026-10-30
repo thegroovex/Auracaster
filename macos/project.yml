@@ -35,7 +35,7 @@ targets:
       base:
         PRODUCT_NAME: Auracaster
         PRODUCT_BUNDLE_IDENTIFIER: de.groovex.Auracaster
-        MARKETING_VERSION: "0.1.3"
+        MARKETING_VERSION: "0.1.4"
         CURRENT_PROJECT_VERSION: "1"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
@@ -77,6 +77,10 @@ targets:
       - path: Auracaster/Firmware/FirmwareCore.swift
       - path: Auracaster/Update/UpdateService.swift
       - path: Auracaster/Audio/CapturePlan.swift
+      - path: Auracaster/Model/LatencyParameters.swift
+      - path: Auracaster/Model/BroadcastCode.swift
+      - path: Auracaster/Model/BroadcastURI.swift
+      - path: Auracaster/Model/AdaptiveBuffer.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.groovex.AuracasterTests

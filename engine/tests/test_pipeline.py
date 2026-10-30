@@ -155,6 +155,49 @@ def test_stall_flush() -> None:
 
 
 # -----------------------------------------------------------------------------
+def test_repeated_stalls_no_flush_storm() -> None:
+    """v0.1.3 real test (HQ 48_4): 130 ms controller stalls every ~180 ms for
+    5 s → 27 flushes back to 30 ms (audible). Now: flushes rate limited, the
+    target is raised instead, and it returns to 30 ms once stable."""
+    print('repeated stalls (no flush storm, temporary target boost)')
+    bpf = 8
+    frame = 480
+    ring = h.PcmRing(bpf, RATE // 4)
+    picker = h.FramePicker(ring, frame, RATE * 30 // 1000, channels=2, float_samples=True, sample_rate=RATE)
+    written = 0
+    mac_time = 0.0
+    i = 0
+    burst_from, burst_to = 500, 1000  # 5 s with stalls
+    max_target = picker.target
+    while i < 5000:  # 50 s
+        radio_time = (i + 1) * frame / RATE
+        while mac_time <= radio_time:
+            ring.write(sine_stereo(written, 512))
+            written += 512
+            mac_time += 512 / RATE
+        if burst_from <= i < burst_to and (i - burst_from) % 18 < 13:
+            i += 1  # radio takes nothing for 130 of every 180 ms
+            continue
+        picker.next()
+        max_target = max(max_target, picker.target)
+        i += 1
+    check(picker.flushes <= 6, f'at most ~1 flush per second of audio (got {picker.flushes})')
+    check(picker.boosts >= 1, f'target raised instead of repeated cuts (boosts {picker.boosts})')
+    check(max_target <= RATE * h.FramePicker.BOOST_MAX_MS // 1000, 'boost capped at 150 ms')
+    check(picker.target == RATE * 30 // 1000, f'back to the 30 ms target when stable ({picker.target * 1000 / RATE:.0f} ms)')
+    print(f'         flushes {picker.flushes}, suppressed {picker.flushes_suppressed}, boosts {picker.boosts}, '
+          f'max target {max_target * 1000 / RATE:.0f} ms')
+
+
+def test_stall_classification() -> None:
+    print('stall cause (radio vs. USB vs. host)')
+    check(h.classify_stall(100, 120, 8, 8) == 'radio', 'queue full while waiting = radio')
+    check(h.classify_stall(100, 120, 1, 8) == 'usb', 'queue almost empty while waiting = USB/host link')
+    check(h.classify_stall(5, 120, 8, 8) == 'host', 'no waiting = host')
+    check(h.classify_stall(100, 120, None, 8) == 'radio', 'unknown queue = radio')
+
+
+# -----------------------------------------------------------------------------
 def test_lc3_roundtrip() -> None:
     print('LC3 round trip (ring → encode → per-BIS decode)')
     lc3 = h.lc3
@@ -324,6 +367,8 @@ def test_engine_loop() -> None:
 if __name__ == '__main__':
     test_jitter_buffer()
     test_stall_flush()
+    test_repeated_stalls_no_flush_storm()
+    test_stall_classification()
     test_lc3_roundtrip()
     test_engine_loop()
     print('FAILED:' if FAILURES else 'all pipeline tests passed', *FAILURES, sep='\n  ')

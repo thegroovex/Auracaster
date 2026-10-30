@@ -99,16 +99,48 @@ struct MenuBarPanel: View {
                         .fixedSize()
                         .disabled(model.isTransitioning)
                     }
-                    Text(model.preset.codecSummary + " · ≈ \(model.preset.estimatedLatencyMilliseconds) ms")
+                    Text(model.currentParameters.codecSummary + " · ≈ \(model.currentParameters.radioLatencyMilliseconds) ms")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                    if model.isLive && model.robustExtraMilliseconds > 0 {
+                        Label("+\(model.robustExtraMilliseconds) ms Robust-Puffer (Aussetzer erkannt)", systemImage: "shield.lefthalf.filled")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .lineLimit(1)
+                    }
+                    if model.preset == .custom {
+                        Text("Werte von „Eigenes“: Einstellungen → Erweitert")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
                     if model.isLive {
                         StereoLevelMeter(levels: model.levels, barHeight: 6)
                             .frame(height: 18)
                     }
                 }
                 .module()
+
+                // Private broadcast: pairing (password + QR) in the main window
+                if model.isPrivateBroadcast {
+                    Button {
+                        openWindow(id: WindowID.main)
+                        NSApplication.shared.activate()
+                        model.isPairingSheetPresented = true
+                    } label: {
+                        HStack {
+                            Image(systemName: "lock.fill")
+                                .foregroundStyle(Color.accentColor)
+                            Text("Privat · Kopplung anzeigen")
+                            Spacer()
+                            Image(systemName: "qrcode")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .module()
+                }
 
                 // Receivers (Broadcast Assistant; demo data only in the simulation)
                 if !model.receivers.isEmpty {

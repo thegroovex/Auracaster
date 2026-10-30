@@ -65,6 +65,7 @@ struct ContentView: View {
 
     var body: some View {
         @Bindable var updater = updater
+        @Bindable var model = model
         @Bindable var dongleAssistant = DongleAssistant.shared
 
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -85,6 +86,10 @@ struct ContentView: View {
         .sheet(isPresented: $updater.isSheetPresented) {
             UpdateSheet()
                 .environment(updater)
+        }
+        .sheet(isPresented: $model.isPairingSheetPresented) {
+            PairingSheet()
+                .environment(model)
         }
         .sheet(isPresented: $dongleAssistant.isSheetPresented) {
             DongleAssistantView(style: .sheet)

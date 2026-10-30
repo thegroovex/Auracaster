@@ -42,7 +42,12 @@ Commands (one JSON object per line):
         preset: {"frame_duration_us": 10000, "bitrate": 96000,
                  "presentation_delay_us": 40000, "rtn": 4,
                  "max_transport_latency_ms": 65, "sample_rate_hz": 48000,
-                 "prefill": 0, "jitter_ms": 0}        (0 = automatic)
+                 "prefill": 0, "jitter_ms": 0,        (0 = automatic)
+                 "phy": "2M", "packing": "sequential", "custom": false}
+                Out-of-range values are clamped (log line "Preset angepasst"); a
+                BIG the controller rejects falls back to safe values (v0.1.4).
+        broadcast: {"name": ..., "code": "4-16 byte UTF-8 password" | null, ...}
+                code set = encrypted BIG (Broadcast_Code) + PBP "encrypted" flag.
         A start while live restarts the broadcast with the new settings.
     {"cmd": "stop", "id": 2}
     {"cmd": "status", "id": 3}
@@ -50,6 +55,7 @@ Commands (one JSON object per line):
     {"cmd": "connect", "id": 5}            open the dongle now (status only)
     {"cmd": "controller_info", "id": 6}    diagnostics ("Dongle prüfen")
     {"cmd": "shutdown", "id": 7}
+    {"cmd": "set_jitter", "id": 8, "jitter_ms": 60}   jitter target while live (v0.1.4)
 
 Events (one JSON object per line):
     {"event": "ready", "version": "...", "protocol": 2, "transport": "...", "lc3": true}
@@ -105,7 +111,7 @@ import traceback
 from collections.abc import AsyncGenerator
 from typing import Any
 
-HELPER_VERSION = '0.1.3'
+HELPER_VERSION = '0.1.4'
 PROTOCOL_VERSION = 2
 
 # -----------------------------------------------------------------------------
@@ -329,6 +335,19 @@ async def wait_for_serial_port(transport_name: str, deadline: float, poll: float
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
+# Ranges the app offers in "Erweitert · Latenz" (v0.1.4). The engine clamps to
+# the same limits, so a hand-edited or stale preset can never reach the
+# controller with values the UI would not allow.
+PRESET_LIMITS: dict[str, tuple[int, int]] = {
+    'presentation_delay_us': (5_000, 100_000),
+    'rtn': (0, 4),
+    'max_transport_latency_ms': (5, 100),
+    'jitter_ms': (10, 250),  # 0 = automatic (30 ms); the app offers 10-150
+    'bitrate': (16_000, 320_000),
+}
+SAMPLE_RATES = (16000, 24000, 32000, 48000)
+
+
 @dataclasses.dataclass
 class Preset:
     frame_duration_us: int = 10000  # 7500 or 10000
@@ -345,19 +364,125 @@ class Preset:
     jitter_ms: int = 0
     # BIS packing in the BIG: 'sequential' (default) or 'interleaved'
     packing: str = 'sequential'
+    # BIG PHY: '2M' (default) or '1M' (v0.1.4)
+    phy: str = '2M'
+    # Preset "Eigenes" from the app (v0.1.4): only informational (log)
+    custom: bool = False
+    # v0.1.4: explicit BIG layout via HCI LE Create BIG Test (NSE/BN/IRC/PTO set
+    # by the app instead of being derived by the controller from RTN/latency).
+    # The Zephyr LL silently lowers RTN when the BIG event does not fit into the
+    # ISO interval (ull_adv_iso.c: "if (!test_config && rtn) rtn--"); with the
+    # test command it rejects (0x12) instead -> fallback to LE Create BIG.
+    big_test: bool = False
+    nse: int = 4
+    bn: int = 1
+    irc: int = 4
+    pto: int = 0
 
     @classmethod
     def from_json(cls, data: dict[str, Any] | None) -> Preset:
-        preset = cls(**{k: v for k, v in (data or {}).items() if k in cls.__dataclass_fields__})
-        if preset.frame_duration_us not in (7500, 10000):
-            raise ValueError('frame_duration_us must be 7500 or 10000')
-        if preset.sample_rate_hz not in (0, 16000, 24000, 32000, 48000):
-            raise ValueError('sample_rate_hz must be 16000, 24000, 32000 or 48000')
-        if preset.packing not in ('sequential', 'interleaved'):
-            raise ValueError('packing must be sequential or interleaved')
-        if not 0 <= preset.jitter_ms <= 250:
-            raise ValueError('jitter_ms must be 0..250')
+        preset, adjustments = cls.parse(data)
+        for line in adjustments:
+            logger.warning('preset adjusted: %s', line)
+            emit('log', level='warning', message=f'Preset angepasst: {line}')
         return preset
+
+    @classmethod
+    def parse(cls, data: dict[str, Any] | None) -> tuple[Preset, list[str]]:
+        """Builds a preset and clamps every value into its valid range.
+
+        Returns the preset plus a human readable list (German) of what was
+        changed. Unknown keys are ignored; wrong types fall back to defaults.
+        """
+        fields = cls.__dataclass_fields__
+        defaults = cls()
+        raw = {k: v for k, v in (data or {}).items() if k in fields}
+        preset = cls()
+        adjustments: list[str] = []
+        for key, value in raw.items():
+            default = getattr(defaults, key)
+            try:
+                if isinstance(default, bool):
+                    value = bool(value)
+                elif isinstance(default, int):
+                    value = int(value)
+                else:
+                    value = str(value)
+            except (TypeError, ValueError):
+                adjustments.append(f'{key}={value!r} ungültig → {default}')
+                value = default
+            setattr(preset, key, value)
+
+        def clamp(key: str, low: int, high: int, zero_ok: bool = False) -> None:
+            value = getattr(preset, key)
+            if zero_ok and value == 0:
+                return
+            clamped = min(high, max(low, value))
+            if clamped != value:
+                adjustments.append(f'{key} {value} → {clamped}')
+                setattr(preset, key, clamped)
+
+        if preset.frame_duration_us not in (7500, 10000):
+            new = 7500 if preset.frame_duration_us < 8750 else 10000
+            adjustments.append(f'frame_duration_us {preset.frame_duration_us} → {new}')
+            preset.frame_duration_us = new
+        if preset.sample_rate_hz != 0 and preset.sample_rate_hz not in SAMPLE_RATES:
+            new = min(SAMPLE_RATES, key=lambda rate: abs(rate - preset.sample_rate_hz))
+            adjustments.append(f'sample_rate_hz {preset.sample_rate_hz} → {new}')
+            preset.sample_rate_hz = new
+        if preset.packing not in ('sequential', 'interleaved'):
+            adjustments.append(f'packing {preset.packing!r} → sequential')
+            preset.packing = 'sequential'
+        phy = preset.phy.upper().replace('LE_', '').replace('LE', '')
+        if phy not in ('1M', '2M'):
+            adjustments.append(f'phy {preset.phy!r} → 2M')
+            phy = '2M'
+        preset.phy = phy
+        for key, (low, high) in PRESET_LIMITS.items():
+            clamp(key, low, high, zero_ok=key == 'jitter_ms')
+        clamp('prefill', 0, 16)
+        if preset.big_test:
+            clamp('bn', 1, 3)
+            clamp('irc', 1, 15)
+            clamp('pto', 0, 15)
+            minimum = preset.bn * preset.irc
+            nse = max(minimum, min(31, preset.nse))
+            nse -= nse % preset.bn  # NSE is a multiple of BN
+            nse = max(minimum, nse)
+            if nse > 31:  # BN × IRC too large
+                preset.irc = 31 // preset.bn
+                adjustments.append(f'irc → {preset.irc} (BN × IRC ≤ 31)')
+                nse = preset.bn * preset.irc
+            if nse != preset.nse:
+                adjustments.append(f'nse {preset.nse} → {nse}')
+                preset.nse = nse
+            if preset.pto and not preset.bn * preset.irc < preset.nse:
+                adjustments.append(f'pto {preset.pto} → 0 (braucht NSE > BN × IRC)')
+                preset.pto = 0
+        return preset, adjustments
+
+    @property
+    def hci_phy(self) -> hci.PhyBit:
+        return hci.PhyBit.LE_1M if self.phy == '1M' else hci.PhyBit.LE_2M
+
+    @property
+    def iso_interval_us(self) -> int:
+        """ISO interval of an explicit BIG: BN SDUs per event (unframed)."""
+        return self.frame_duration_us * (self.bn if self.big_test else 1)
+
+    def describe_big_request(self) -> str:
+        """Target values of the BIG (what the app asked for), German log text."""
+        if self.big_test:
+            layout = (
+                f'explizit NSE {self.nse}, BN {self.bn}, IRC {self.irc}, PTO {self.pto}, '
+                f'ISO-Intervall {self.iso_interval_us / 1000:g} ms'
+            )
+        else:
+            layout = f'RTN {self.rtn}, max. Transportlatenz {self.max_transport_latency_ms} ms'
+        return (
+            f'{layout}, PHY {self.phy}, {self.packing}, PD {self.presentation_delay_us / 1000:g} ms, '
+            f'Frame {self.frame_duration_us / 1000:g} ms'
+        )
 
     @property
     def prefill_sdus(self) -> int:
@@ -389,6 +514,10 @@ class BroadcastConfig:
     @classmethod
     def from_json(cls, data: dict[str, Any] | None) -> BroadcastConfig:
         config = cls(**{k: v for k, v in (data or {}).items() if k in cls.__dataclass_fields__})
+        if not config.code:
+            config.code = None  # '' = open broadcast
+        else:
+            broadcast_code_bytes(config.code)  # validates 4-16 bytes, German message
         if not config.broadcast_id:
             config.broadcast_id = 1 + secrets.randbelow(0xFFFFFF)
         return config
@@ -406,17 +535,214 @@ class AudioConfig:
         return cls(**{k: v for k, v in (data or {}).items() if k in cls.__dataclass_fields__})
 
 
+BROADCAST_CODE_MIN_BYTES = 4  # BAP / Auracast: Broadcast_Code of at least 4 octets
+BROADCAST_CODE_MAX_BYTES = 16
+
+
 def broadcast_code_bytes(broadcast_code: str) -> bytes:
-    """Same rules as apps/auracast.py: 0x-prefixed hex or UTF-8 string, 16 bytes."""
+    """Broadcast_Code (16 octets) for HCI LE Create BIG.
+
+    Same rules as apps/auracast.py: a 0x-prefixed hex string is taken as the
+    raw 16-octet value; anything else is a password, UTF-8 encoded and padded
+    with 0x00 to 16 octets (BAP 1.0.1, "Broadcast_Code" / Auracast password,
+    4-16 octets). The app derives the same bytes (BroadcastCode.swift).
+    """
     if broadcast_code.startswith('0x'):
         value = bytes.fromhex(broadcast_code[2:])
         if len(value) != 16:
-            raise ValueError('broadcast code must be 16 bytes')
+            raise ValueError('Broadcast Code (hex) muss genau 16 Byte haben')
         return bytes(reversed(value))
     value = broadcast_code.encode('utf-8')
-    if len(value) > 16:
-        raise ValueError('broadcast code must be <= 16 bytes')
+    if not BROADCAST_CODE_MIN_BYTES <= len(value) <= BROADCAST_CODE_MAX_BYTES:
+        raise ValueError(
+            f'Broadcast Code muss 4–16 Byte (UTF-8) lang sein, ist {len(value)} Byte'
+        )
     return value + bytes(16 - len(value))
+
+
+@hci.HCI_Command.command
+@dataclasses.dataclass
+class HCI_LE_Create_BIG_Test_Command(hci.HCI_AsyncCommand):
+    """Core 5.4 Vol 4 Part E 7.8.104 LE Create BIG Test (not wrapped by bumble)."""
+
+    big_handle: int = dataclasses.field(metadata=hci.metadata(1))
+    advertising_handle: int = dataclasses.field(metadata=hci.metadata(1))
+    num_bis: int = dataclasses.field(metadata=hci.metadata(1))
+    sdu_interval: int = dataclasses.field(metadata=hci.metadata(3))
+    iso_interval: int = dataclasses.field(metadata=hci.metadata(2))  # units of 1.25 ms
+    nse: int = dataclasses.field(metadata=hci.metadata(1))
+    max_sdu: int = dataclasses.field(metadata=hci.metadata(2))
+    max_pdu: int = dataclasses.field(metadata=hci.metadata(2))
+    phy: int = dataclasses.field(metadata=hci.metadata(1))
+    packing: int = dataclasses.field(metadata=hci.metadata(1))
+    framing: int = dataclasses.field(metadata=hci.metadata(1))
+    bn: int = dataclasses.field(metadata=hci.metadata(1))
+    irc: int = dataclasses.field(metadata=hci.metadata(1))
+    pto: int = dataclasses.field(metadata=hci.metadata(1))
+    encryption: int = dataclasses.field(metadata=hci.metadata(1))
+    broadcast_code: bytes = dataclasses.field(metadata=hci.metadata(16))
+
+
+def make_big_test_command(
+    big_handle: int, advertising_handle: int, preset: Preset, channels: int, frame_size: int, code: str | None
+) -> HCI_LE_Create_BIG_Test_Command:
+    return HCI_LE_Create_BIG_Test_Command(
+        big_handle=big_handle,
+        advertising_handle=advertising_handle,
+        num_bis=channels,
+        sdu_interval=preset.frame_duration_us,
+        iso_interval=preset.iso_interval_us * 4 // 5000,  # µs -> 1.25 ms units
+        nse=preset.nse,
+        max_sdu=frame_size,
+        max_pdu=frame_size,
+        phy=int(preset.hci_phy),
+        packing=1 if preset.packing == 'interleaved' else 0,
+        framing=0,
+        bn=preset.bn,
+        irc=preset.irc,
+        pto=preset.pto,
+        encryption=1 if code else 0,
+        broadcast_code=broadcast_code_bytes(code) if code else bytes(16),
+    )
+
+
+async def create_big_test(
+    device: Any, advertising_set: Any, preset: Preset, channels: int, frame_size: int, code: str | None
+) -> Any:
+    """Same as bumble Device.create_big, but with LE Create BIG Test."""
+    big_handle = device.next_big_handle()
+    if big_handle is None:
+        raise RuntimeError('keine freie BIG-Nummer')
+    big = bumble.device.Big(
+        big_handle=big_handle,
+        parameters=make_big_parameters(preset, channels, frame_size, code),
+        advertising_set=advertising_set,
+    )
+    device.bigs[big_handle] = big
+    established = asyncio.get_running_loop().create_future()
+
+    def on_established() -> None:
+        if not established.done():
+            established.set_result(None)
+
+    def on_failure(status: int) -> None:
+        if not established.done():
+            established.set_exception(hci.HCI_Error(status))
+
+    big.once(big.Event.ESTABLISHMENT, on_established)
+    big.once(big.Event.ESTABLISHMENT_FAILURE, on_failure)
+    try:
+        await device.send_async_command(
+            make_big_test_command(big_handle, advertising_set.advertising_handle, preset, channels, frame_size, code)
+        )
+        await established
+    except Exception:
+        device.bigs.pop(big_handle, None)
+        raise
+    return big
+
+
+def describe_hci_create_big(preset: Preset, channels: int, frame_size: int, code: str | None) -> str:
+    """The parameters actually sent to the controller (log, v0.1.4)."""
+    if preset.big_test:
+        return (
+            f'LE Create BIG Test: BIS {channels}, SDU-Intervall {preset.frame_duration_us} µs, '
+            f'ISO-Intervall {preset.iso_interval_us} µs, NSE {preset.nse}, BN {preset.bn}, IRC {preset.irc}, '
+            f'PTO {preset.pto}, max. SDU/PDU {frame_size} B, PHY {preset.phy}, Packing {preset.packing}, '
+            f'Framing unframed, Verschlüsselung {"ja" if code else "nein"}, '
+            f'PD {preset.presentation_delay_us / 1000:g} ms'
+        )
+    return (
+        f'LE Create BIG: BIS {channels}, SDU-Intervall {preset.frame_duration_us} µs, max. SDU {frame_size} B, '
+        f'max. Transportlatenz {preset.max_transport_latency_ms} ms, RTN {preset.rtn}, PHY {preset.phy}, '
+        f'Packing {preset.packing}, Framing unframed, Verschlüsselung {"ja" if code else "nein"}, '
+        f'PD {preset.presentation_delay_us / 1000:g} ms'
+    )
+
+
+def big_rtn_note(preset: Preset, irc: Any) -> str | None:
+    """Explains a lower IRC than requested (Zephyr LL reduces RTN silently)."""
+    if preset.big_test or not isinstance(irc, int):
+        return None
+    if irc < preset.rtn + 1:
+        return (
+            f'Controller nutzt IRC {irc} statt {preset.rtn + 1} (RTN {preset.rtn}): das BIG-Event passt '
+            'sonst nicht ins ISO-Intervall – der Zephyr-Controller senkt RTN dann still. Mehr Wiederholungen '
+            'nur mit kleinerer Bitrate, Mono, 10-ms-Frames oder expliziten BIG-Werten (Erweitert).'
+        )
+    return None
+
+
+def public_broadcast_features(encrypted: bool, codec_rate: int) -> Any:
+    """PBP features byte: "encrypted" makes phones show the lock / password field."""
+    features = pbp.PublicBroadcastAnnouncement.Features(0)
+    if encrypted:
+        features |= pbp.PublicBroadcastAnnouncement.Features.ENCRYPTED
+    if codec_rate == 48000:
+        features |= pbp.PublicBroadcastAnnouncement.Features.HIGH_QUALITY_CONFIGURATION
+    else:
+        features |= pbp.PublicBroadcastAnnouncement.Features.STANDARD_QUALITY_CONFIGURATION
+    return features
+
+
+def make_big_parameters(
+    preset: Preset, channels: int, frame_size: int, code: str | None
+) -> Any:
+    """HCI LE Create BIG parameters (encryption = 1 when a code is set)."""
+    return bumble.device.BigParameters(
+        num_bis=channels,
+        sdu_interval=preset.frame_duration_us,
+        max_sdu=frame_size,
+        max_transport_latency=preset.max_transport_latency_ms,
+        rtn=preset.rtn,
+        phy=preset.hci_phy,
+        packing=(
+            bumble.device.BigParameters.Packing.INTERLEAVED
+            if preset.packing == 'interleaved'
+            else bumble.device.BigParameters.Packing.SEQUENTIAL
+        ),
+        broadcast_code=broadcast_code_bytes(code) if code else None,
+    )
+
+
+# HCI errors that mean "the controller does not accept these BIG values"
+# (a controller reset would not help - fall back to safe values instead).
+BIG_PARAMETER_ERRORS = {0x11, 0x12, 0x30}  # unsupported value, invalid params, out of range
+BIG_CREATE_TIMEOUT_S = 6.0
+
+
+def is_big_parameter_rejection(error: BaseException) -> bool:
+    code = getattr(error, 'error_code', None)
+    return isinstance(code, int) and code in BIG_PARAMETER_ERRORS
+
+
+def big_fallback_preset(preset: Preset) -> Preset:
+    """Safe BIG values that every preset of v0.1.2+ ran with on the nRF52840."""
+    return dataclasses.replace(
+        preset,
+        rtn=min(preset.rtn, 2),
+        max_transport_latency_ms=min(max(20, preset.max_transport_latency_ms), 40),
+        phy='2M',
+        packing='sequential',
+        big_test=False,
+    )
+
+
+def big_error_reason(error: BaseException) -> str:
+    if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
+        return 'keine Antwort des Controllers (Zeitüberschreitung)'
+    name = getattr(error, 'error_name', None) or type(error).__name__
+    code = getattr(error, 'error_code', None)
+    return f'{name} (0x{code:02X})' if isinstance(code, int) else (str(error) or name)
+
+
+def describe_big_error(error: BaseException, preset: Preset) -> str:
+    """German, user facing explanation of a failed LE Create BIG."""
+    reason = big_error_reason(error)
+    return (
+        f'Der Dongle hat die BIG-Werte abgelehnt: {reason}. Angefragt: {preset.describe_big_request()}. '
+        'Bitte RTN oder Transportlatenz ändern bzw. ein anderes Preset wählen.'
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -602,6 +928,15 @@ class FramePicker:
     """
 
     FADE_SAMPLES = 64
+    # v0.1.4 (real test log v0.1.3, HQ 48_4): after a controller stall the
+    # buffer was cut back to 30 ms every ~180 ms (27 flushes in 5 s, audible).
+    # Now at most one flush per FLUSH_MIN_INTERVAL_S of audio; a repeated
+    # backlog within BOOST_HOLD_S raises the target (×2, max BOOST_MAX_MS)
+    # instead of cutting back again, and the boost expires after BOOST_HOLD_S
+    # without another backlog. Times are audio time (frames delivered).
+    FLUSH_MIN_INTERVAL_S = 1.0
+    BOOST_HOLD_S = 10.0
+    BOOST_MAX_MS = 150
 
     def __init__(
         self,
@@ -631,8 +966,31 @@ class FramePicker:
         self.slips_inserted = 0
         self.flushes = 0
         self.flushed_frames = 0
+        self.boosts = 0
+        self.flushes_suppressed = 0
         self._since_slip = 0
         self._fade_in = False
+        self.base_target = self.target
+        self.boost_target = 0
+        self._clock_frames = 0  # audio time: frames delivered so far
+        self._last_flush_s: float | None = None
+        self._boost_until_s = 0.0
+
+    @property
+    def audio_time_s(self) -> float:
+        return self._clock_frames / self.sample_rate
+
+    def _apply_target(self) -> None:
+        self.target = max(self.frame_samples, self.base_target, self.boost_target)
+        self.flush_above = 2 * self.target + self.window
+
+    def set_target_ms(self, milliseconds: float) -> int:
+        """Changes the jitter buffer target while live ("Robust bei Aussetzern",
+        v0.1.4). A larger target makes the next underrun rebuffer longer; the
+        slip logic then fills/drains towards it gently (no jump, no click)."""
+        self.base_target = max(self.frame_samples, int(self.sample_rate * milliseconds / 1000))
+        self._apply_target()
+        return self.target
 
     def _fade(self, data: bytes) -> bytes:
         samples = array.array('f' if self.float_samples else 'h', data)
@@ -646,6 +1004,10 @@ class FramePicker:
         return samples.tobytes()
 
     def next(self) -> bytes:
+        self._clock_frames += self.frame_samples
+        if self.boost_target and self.audio_time_s > self._boost_until_s:
+            self.boost_target = 0  # stable again: back to the configured target
+            self._apply_target()
         data = self._next()
         if self._fade_in and data is not self.silence:
             self._fade_in = False
@@ -670,6 +1032,26 @@ class FramePicker:
             return self.silence
         assert self.average is not None
         if fill > self.flush_above:
+            now = self.audio_time_s
+            since = None if self._last_flush_s is None else now - self._last_flush_s
+            if since is not None and since < self.FLUSH_MIN_INTERVAL_S:
+                # rate limit: ride it out (the ring caps the backlog at 250 ms)
+                self.flushes_suppressed += 1
+                return self._regular(fill, n)
+            if since is not None and since < self.BOOST_HOLD_S:
+                # repeated backlog: a bigger target instead of another cut to the minimum
+                boost_max = self.sample_rate * self.BOOST_MAX_MS // 1000
+                self.boost_target = min(boost_max, max(self.target * 2, self.boost_target))
+                self.boosts += 1
+                self._apply_target()
+                logger.warning(
+                    'repeated backlog -> jitter target raised to %.0f ms for %.0f s',
+                    self.target * 1000 / self.sample_rate, self.BOOST_HOLD_S,
+                )
+            self._last_flush_s = now
+            self._boost_until_s = now + self.BOOST_HOLD_S
+            if fill <= self.target + self.window:
+                return self._regular(fill, n)
             drop = fill - self.target
             self.ring.read(drop)
             self.flushes += 1
@@ -684,6 +1066,10 @@ class FramePicker:
             fill = self.ring.frames
             if fill < n:
                 return self.silence
+        return self._regular(fill, n)
+
+    def _regular(self, fill: int, n: int) -> bytes:
+        assert self.average is not None
         self.average += 0.02 * (fill - self.average)  # ~0.5 s time constant
         self._since_slip += 1
         bpf = self.ring.bytes_per_frame
@@ -703,6 +1089,28 @@ class FramePicker:
                     self._since_slip = 0
                     return data + data[-bpf:]
         return self.ring.read(n) or self.silence
+
+
+STALL_CAUSE_TEXT = {
+    'radio': 'Funk/Controller – Warteschlange voll, Bestätigungen bleiben aus',
+    'usb': 'USB/Host→Dongle – Warteschlange fast leer, Pakete kommen nicht an',
+    'host': 'Host – Python/Encoder',
+}
+
+
+def classify_stall(radio_wait_ms: float, loop_ms: float, pending: int | None, capacity: int) -> str:
+    """Where a stall came from (v0.1.4 diagnostics).
+
+    Waiting for completions with the controller queue full = the radio/link
+    layer does not get the SDUs out (airtime, scheduling). Waiting with an
+    (almost) empty queue = the packets do not reach the dongle in time (USB
+    CDC flow control / serial write). Not waiting = the host itself was slow.
+    """
+    if radio_wait_ms <= loop_ms / 2:
+        return 'host'
+    if pending is not None and capacity > 0 and pending < max(1, capacity // 2):
+        return 'usb'
+    return 'radio'
 
 
 def measure_levels(pcm: bytes, pcm_format: audio_io.PcmFormat) -> tuple[list[float], list[float]]:
@@ -786,6 +1194,8 @@ class Engine:
         self.last_stats: dict[str, Any] = {}
         self.firmware: dict[str, Any] = {}
         self.big_info: dict[str, Any] = {}
+        self.picker: FramePicker | None = None
+        self.requested_preset: Preset | None = None
 
     # -- device ----------------------------------------------------------------
     async def ensure_device(self) -> bumble.device.Device:
@@ -945,6 +1355,15 @@ class Engine:
         self.transmit_task = asyncio.create_task(self._transmit(ready))
         await ready  # raises if setup failed
 
+    def set_jitter(self, jitter_ms: int) -> None:
+        limit_low, limit_high = PRESET_LIMITS['jitter_ms']
+        value = min(limit_high, max(limit_low, jitter_ms))
+        if self.preset is not None:
+            self.preset.jitter_ms = value
+        if self.picker is not None:
+            self.picker.set_target_ms(value)
+        logger.info('jitter target -> %d ms', value)
+
     async def stop(self) -> None:
         if self.transmit_task is None:
             self.set_state('idle')
@@ -1056,13 +1475,7 @@ class Engine:
 
         public_announcement = None
         if broadcast.public:
-            features = pbp.PublicBroadcastAnnouncement.Features(0)
-            if broadcast.code:
-                features |= pbp.PublicBroadcastAnnouncement.Features.ENCRYPTED
-            if codec_rate == 48000:
-                features |= pbp.PublicBroadcastAnnouncement.Features.HIGH_QUALITY_CONFIGURATION
-            else:
-                features |= pbp.PublicBroadcastAnnouncement.Features.STANDARD_QUALITY_CONFIGURATION
+            features = public_broadcast_features(bool(broadcast.code), codec_rate)
             public_announcement = pbp.PublicBroadcastAnnouncement(
                 features=features, metadata=metadata
             )
@@ -1145,41 +1558,58 @@ class Engine:
         )
         await self.advertising_set.start_periodic()
 
-        self.big = await device.create_big(
-            self.advertising_set,
-            parameters=bumble.device.BigParameters(
-                num_bis=channels,
-                sdu_interval=preset.frame_duration_us,
-                max_sdu=frame_size,
-                max_transport_latency=preset.max_transport_latency_ms,
-                rtn=preset.rtn,
-                phy=hci.PhyBit.LE_2M,
-                packing=(
-                    bumble.device.BigParameters.Packing.INTERLEAVED
-                    if preset.packing == 'interleaved'
-                    else bumble.device.BigParameters.Packing.SEQUENTIAL
-                ),
-                broadcast_code=(
-                    broadcast_code_bytes(broadcast.code) if broadcast.code else None
-                ),
-            ),
-        )
+        # v0.1.4: timeout - a controller that never answers LE Create BIG must
+        # not hang the start (fallback/reset handles it in _transmit).
+        hci_text = describe_hci_create_big(preset, channels, frame_size, broadcast.code)
+        logger.info('%s', hci_text)
+        emit('log', level='info', message=hci_text)
+        if preset.big_test:
+            create = create_big_test(device, self.advertising_set, preset, channels, frame_size, broadcast.code)
+        else:
+            create = device.create_big(
+                self.advertising_set,
+                parameters=make_big_parameters(preset, channels, frame_size, broadcast.code),
+            )
+        self.big = await asyncio.wait_for(create, BIG_CREATE_TIMEOUT_S)
         big = self.big
+        requested = self.requested_preset or preset
+        transport_latency_us = getattr(big, 'transport_latency_big', None)
         self.big_info = {
             'big_nse': getattr(big, 'nse', None),
             'big_bn': getattr(big, 'bn', None),
             'big_pto': getattr(big, 'pto', None),
             'big_irc': getattr(big, 'irc', None),
             'big_iso_interval_ms': getattr(big, 'iso_interval', None),
-            'big_transport_latency_us': getattr(big, 'transport_latency_big', None),
+            'big_transport_latency_us': transport_latency_us,
             'big_packing': preset.packing,
+            'big_phy': preset.phy,
+            'big_encrypted': bool(broadcast.code),
+            # target values (v0.1.4): what the app asked for, next to the actual ones
+            'big_req_rtn': requested.rtn,
+            'big_req_latency_ms': requested.max_transport_latency_ms,
+            'big_req_phy': requested.phy,
+            'big_req_packing': requested.packing,
+            'big_req_pd_ms': requested.presentation_delay_us / 1000,
+            'big_fallback': preset != requested,
         }
         logger.info('BIG parameters chosen by the controller: %s', self.big_info)
+        actual = (
+            'NSE {big_nse}, BN {big_bn}, PTO {big_pto}, IRC {big_irc}, '
+            'ISO-Intervall {big_iso_interval_ms} ms'.format(**self.big_info)
+        )
+        if isinstance(transport_latency_us, (int, float)) and transport_latency_us:
+            actual += f', Transportlatenz {transport_latency_us / 1000:.1f} ms'
+        actual += f', PHY {preset.phy}, {preset.packing}'
+        if broadcast.code:
+            actual += ', verschlüsselt'
+        note = big_rtn_note(preset, self.big_info.get('big_irc'))
+        if note:
+            emit('log', level='warning', message=note)
         emit(
             'log',
-            level='info',
-            message='BIG: NSE {big_nse}, BN {big_bn}, PTO {big_pto}, IRC {big_irc}, '
-            'ISO-Intervall {big_iso_interval_ms} ms, Packing {big_packing}'.format(**self.big_info),
+            level='warning' if self.big_info['big_fallback'] else 'info',
+            message=f'BIG Soll: {requested.describe_big_request()} | Ist: {actual}'
+            + (' | RÜCKFALL auf sichere Werte' if self.big_info['big_fallback'] else ''),
         )
         bis_links = list(self.big.bis_links)
         for bis_link in bis_links:
@@ -1234,6 +1664,7 @@ class Engine:
                 float_samples=pcm_format.sample_type != audio_io.PcmFormat.SampleType.INT16,
                 sample_rate=pcm_rate,
             )
+            self.picker = picker
             logger.info(
                 'pipeline: PCM %d Hz %d ch %s -> LC3 %d Hz %.1f ms, %d bytes/BIS, '
                 'prefill %d SDUs, jitter target %d ms',
@@ -1246,19 +1677,41 @@ class Engine:
                 logger.info('recording encoder input to %s', recorder.path)
                 emit('log', level='info', message=f'WAV-Mitschnitt: {recorder.path}')
 
-            # -- radio (one automatic controller reset + retry on failure) ------
+            # -- radio --------------------------------------------------------
+            # attempt 1: requested values. Rejected by the controller (HCI
+            # 0x11/0x12/0x30) -> fallback to safe values without reset. Any
+            # other failure (timeout, wedged controller) -> reset + retry, and
+            # a last attempt with the safe values. Never hangs: create_big has
+            # a timeout and the whole loop is bounded.
             bis_links: list[Any] = []
-            for attempt in (1, 2):
+            self.requested_preset = preset
+            first_error: BaseException | None = None
+            for attempt in (1, 2, 3):
                 device = await self.ensure_device()
                 try:
                     bis_links = await self._setup_radio(device, codec_rate, channels, frame_size)
                     break
                 except Exception as error:  # pylint: disable=broad-except
                     logger.warning('radio setup failed (attempt %d): %r', attempt, error)
+                    first_error = first_error or error
                     await self._teardown_radio()
-                    if attempt == 2:
-                        raise
-                    await self.reset_controller(f'Broadcast-Start fehlgeschlagen: {error}')
+                    fallback = big_fallback_preset(self.preset)
+                    can_fall_back = fallback != self.preset
+                    rejected = is_big_parameter_rejection(error)
+                    if attempt == 3 or (rejected and not can_fall_back):
+                        raise RuntimeError(describe_big_error(first_error, self.requested_preset)) from error
+                    if rejected or attempt == 2:
+                        if not can_fall_back:
+                            raise RuntimeError(describe_big_error(first_error, self.requested_preset)) from error
+                        message = (
+                            f'Controller lehnt die BIG-Werte ab ({big_error_reason(error)}) '
+                            f'– Rückfall auf sichere Werte: {fallback.describe_big_request()}'
+                        )
+                        logger.warning(message)
+                        emit('log', level='warning', message=message)
+                        self.preset = fallback
+                    if not rejected:
+                        await self.reset_controller(f'Broadcast-Start fehlgeschlagen: {error!r}')
 
             device = self.device
             assert device is not None
@@ -1284,6 +1737,8 @@ class Engine:
             stats = PipelineStats()
             stall_ms = 4 * preset.frame_duration_us / 1000
             stalls = 0
+            stall_causes = {'radio': 0, 'usb': 0, 'host': 0}
+            queue_capacity = preset.prefill_sdus * len(streams)
             last_stall_log = 0.0
             level_every = max(1, int(50000 / preset.frame_duration_us))  # ~20 Hz
             last_report = time.monotonic()
@@ -1304,12 +1759,16 @@ class Engine:
                     # who held us up: waiting for controller completions (radio) or
                     # the host side (event loop, encoder thread, GC)?
                     stalls += 1
-                    cause = 'Controller' if radio_wait_ms > loop_ms / 2 else 'Host'
+                    pending = iso_queue.pending if iso_queue else None
+                    kind = classify_stall(radio_wait_ms, loop_ms, pending, queue_capacity)
+                    stall_causes[kind] += 1
+                    cause = STALL_CAUSE_TEXT[kind]
                     if time.monotonic() - last_stall_log > 2:
                         last_stall_log = time.monotonic()
                         message = (
                             f'Stall {loop_ms:.0f} ms ({cause}: Funk-Warten {radio_wait_ms:.0f} ms, '
-                            f'Encoder {encode_ms:.1f} ms, im Controller {iso_queue.pending if iso_queue else "?"})'
+                            f'Encoder {encode_ms:.1f} ms, im Controller {pending if pending is not None else "?"}'
+                            f'/{queue_capacity})'
                         )
                         logger.warning(message)
                         emit('log', level='warning', message=message)
@@ -1336,8 +1795,14 @@ class Engine:
                         'flushes': picker.flushes,
                         'flushed_frames': picker.flushed_frames,
                         'stalls': stalls,
+                        'stalls_radio': stall_causes['radio'],
+                        'stalls_usb': stall_causes['usb'],
+                        'stalls_host': stall_causes['host'],
+                        'flushes_suppressed': picker.flushes_suppressed,
+                        'buffer_boosts': picker.boosts,
                         'radio_wait_ms_max': round(stats.radio_wait_max, 1),
                         'buffer_ms': round(ring.frames * 1000 / pcm_rate, 1),
+                        'jitter_target_ms': round(picker.target * 1000 / pcm_rate),
                         'encode_ms_avg': round(stats.encode_sum / max(1, stats.frames), 2),
                         'encode_ms_max': round(stats.encode_max, 2),
                         'loop_ms_max': round(stats.loop_max, 2),
@@ -1367,6 +1832,7 @@ class Engine:
             if not ready.done():
                 ready.set_exception(error)
         finally:
+            self.picker = None
             await self._teardown_radio()
             await source.close()
             if recorder is not None:
@@ -1450,6 +1916,9 @@ async def handle_command(engine: Engine, message: dict[str, Any]) -> bool:
             )
         elif cmd == 'stop':
             await engine.stop()
+        elif cmd == 'set_jitter':
+            # v0.1.4: adaptive buffer ("Robust bei Aussetzern") - live, no BIG rebuild
+            engine.set_jitter(int(message.get('jitter_ms', 0)))
         elif cmd == 'status':
             emit('status', **engine.status())
         elif cmd == 'scan':

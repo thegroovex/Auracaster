@@ -27,6 +27,58 @@ final class AppModel {
             restartIfLive()
         }
     }
+    /// Values of the preset "Eigenes" (v0.1.4). Saved immediately; while live
+    /// they take effect with `applyCustomPreset()` (one clean restart, not one
+    /// per slider tick).
+    var customParameters: LatencyParameters = CustomPresetStore.load() {
+        didSet {
+            guard customParameters != oldValue else { return }
+            CustomPresetStore.save(customParameters)
+        }
+    }
+    /// Values the running broadcast was started with (nil while idle).
+    private(set) var appliedParameters: LatencyParameters?
+    /// Last "BIG Soll … | Ist …" line from the engine (diagnostics).
+    private(set) var lastBigReport: String?
+
+    // MARK: Private broadcast (v0.1.4)
+    /// Encrypted BIG + Broadcast Code; the code lives in the keychain.
+    var isPrivateBroadcast: Bool = UserDefaults.standard.bool(forKey: SettingsKeys.privateBroadcast) {
+        didSet {
+            guard isPrivateBroadcast != oldValue else { return }
+            UserDefaults.standard.set(isPrivateBroadcast, forKey: SettingsKeys.privateBroadcast)
+            if isPrivateBroadcast && BroadcastCode.validate(broadcastCode) != nil { broadcastCode = BroadcastCode.generate() }
+            restartIfLive()
+        }
+    }
+    var broadcastCode: String = "" {
+        didSet {
+            guard broadcastCode != oldValue else { return }
+            if !ScreenshotMode.isActive && !isPreview {
+                KeychainStore.set(broadcastCode, for: SettingsKeys.broadcastCodeKeychainAccount)
+            }
+        }
+    }
+    /// Pairing sheet (name, password, QR) – opened at the start of a private broadcast.
+    var isPairingSheetPresented = false
+
+    // MARK: Robust bei Aussetzern (v0.1.4)
+    /// Extra Mac buffer the adaptive controller added on top of the preset (ms).
+    private(set) var robustExtraMilliseconds = 0
+    /// Persistent radio losses: offer more robust BIG values for the next start.
+    private(set) var robustRadioSuggestion: LatencyParameters?
+    @ObservationIgnored private var robustController: AdaptiveBufferController?
+    @ObservationIgnored private var previousStats: EngineStats?
+
+    static var isRobustModeEnabled: Bool {
+        UserDefaults.standard.object(forKey: SettingsKeys.robustMode) as? Bool ?? true
+    }
+
+    static var robustMaxExtraMilliseconds: Int {
+        let stored = UserDefaults.standard.integer(forKey: SettingsKeys.robustMaxExtraMs)
+        return stored > 0 ? min(200, stored) : 100
+    }
+
     var volume: Double = 0.8 {
         didSet { pcmTransport?.gain = Float(volume) }
     }
@@ -78,6 +130,7 @@ final class AppModel {
     @ObservationIgnored private var meterTask: Task<Void, Never>?
     @ObservationIgnored private var pcmTransport: FifoPCMTransport?
     @ObservationIgnored private var expectingTermination = false
+    @ObservationIgnored private var isRestarting = false
     private let isPreview: Bool
 
     /// Engine used when nothing was chosen explicitly: the real one whenever the
@@ -118,6 +171,7 @@ final class AppModel {
         if let stored = defaults.string(forKey: SettingsKeys.preset), let saved = BroadcastPreset(rawValue: stored) {
             preset = saved
         }
+        loadBroadcastCode()
         sources = loadSystemSources ? SourceCatalog.load() : [AudioSourceItem.systemAudio]
         // Newcomers: one click on "Senden" sends what the Mac plays.
         selectedSourceID = AudioSourceItem.systemAudio.id
@@ -156,7 +210,35 @@ final class AppModel {
 
     var latencyMilliseconds: Int {
         if isLive, let measured = engineStatus.estimatedLatencyMilliseconds { return measured }
-        return preset.estimatedLatencyMilliseconds
+        return currentParameters.radioLatencyMilliseconds
+    }
+
+    /// Values the preset would send now ("Eigenes": `customParameters`).
+    var currentParameters: LatencyParameters {
+        preset == .custom ? customParameters.clamped().parameters : preset.parameters
+    }
+
+    /// Live with "Eigenes" and the values were edited since the start.
+    var hasPendingCustomChanges: Bool {
+        isLive && preset == .custom && appliedParameters != nil && appliedParameters != customParameters.clamped().parameters
+    }
+
+    /// Can the connected dongle send an encrypted BIG?
+    var encryptionSupport: EncryptionSupport {
+        if isSimulated { return .supported }
+        switch dongleFirmware {
+        case .auracaster(let info):
+            return EncryptionSupport.evaluate(version: info.version.components, flags: info.flags, legacy: false)
+        case .legacyAuracaster:
+            return EncryptionSupport.evaluate(version: nil, flags: 0, legacy: true)
+        default:
+            return .unknown
+        }
+    }
+
+    /// A repeater board is connected: it cannot relay an encrypted broadcast (firmware 0.1.2).
+    var repeaterCannotRelayPrivate: Bool {
+        isPrivateBroadcast && DongleAssistant.shared.boards.contains { $0.role == .repeater }
     }
 
     /// Toolbar indicator. Depends only on the engine's controller state and the
@@ -180,8 +262,8 @@ final class AppModel {
         BroadcastURI(
             name: broadcastName,
             broadcastID: engineStatus.broadcastID ?? broadcastID,
-            highQuality: preset.sampleRate == 48_000,
-            broadcastCode: UserDefaults.standard.string(forKey: SettingsKeys.broadcastCode)
+            highQuality: currentParameters.sampleRate == 48_000,
+            broadcastCode: isPrivateBroadcast ? broadcastCode : nil
         )
     }
 
@@ -284,15 +366,31 @@ final class AppModel {
         clearError()
 
         let defaults = UserDefaults.standard
-        let code = defaults.string(forKey: SettingsKeys.broadcastCode).flatMap { $0.isEmpty ? nil : $0 }
+        var code: String?
+        if isPrivateBroadcast {
+            if case .unsupported(let reason) = encryptionSupport {
+                showError("Privater Broadcast nicht möglich: \(reason)")
+                return
+            }
+            if let problem = BroadcastCode.validate(broadcastCode) {
+                showError("Broadcast-Passwort ungültig: \(problem.message)")
+                return
+            }
+            code = broadcastCode
+        }
+        let (parameters, adjustments) = currentParameters.clamped()
+        for note in adjustments { appendLog("Preset angepasst: \(note)") }
         var request = BroadcastRequest(
             name: broadcastName,
             broadcastID: broadcastID,
             broadcastCode: code,
             language: defaults.string(forKey: SettingsKeys.language) ?? "deu",
             isPublic: defaults.object(forKey: SettingsKeys.isPublic) as? Bool ?? true,
-            preset: preset
+            preset: preset,
+            parameters: parameters
         )
+        appendLog("Preset \(preset.title): \(parameters.summary)" + (code != nil ? " · verschlüsselt" : ""))
+        lastBigReport = nil
         if defaults.bool(forKey: SettingsKeys.recordEncoderInput) {
             request.recordPath = Self.recordingURL().path
         }
@@ -314,7 +412,7 @@ final class AppModel {
                 appendLog("Quelle „\(source.name)“: \(capture.formatDescription)")
                 // 2. FIFO passend zum Format anlegen.
                 let sourceChannels = min(2, max(1, Int(format.mChannelsPerFrame)))
-                let mono = defaults.bool(forKey: SettingsKeys.monoBroadcast) && sourceChannels == 2
+                let mono = parameters.mono && sourceChannels == 2
                 let transport = try FifoPCMTransport(
                     sampleRate: Int(format.mSampleRate),
                     channels: mono ? 1 : sourceChannels,
@@ -338,7 +436,13 @@ final class AppModel {
                 }
                 startCaptureMeter(transport)
                 Task { @MainActor [weak self, weak capture] in
-                    try? await Task.sleep(for: .seconds(1))
+                    // v0.1.4: wait for the first IO cycle (up to 4 s) – logging after a
+                    // fixed 1 s reported "0 Puffer pro IO-Zyklus" before Core Audio started.
+                    for _ in 0..<8 {
+                        try? await Task.sleep(for: .milliseconds(500))
+                        guard let capture, capture.isRunning else { return }
+                        if capture.hasSeenIOCycle { break }
+                    }
                     guard let capture, capture.isRunning else { return }
                     self?.appendLog("Aufnahme: \(capture.aggregateSummary)")
                 }
@@ -349,6 +453,9 @@ final class AppModel {
                 request.audioInput = "silence"
                 try await engine.start(request)
             }
+            appliedParameters = parameters
+            startRobustController(base: parameters.jitterBufferMilliseconds)
+            if code != nil && !isRestarting && !ScreenshotMode.isActive { isPairingSheetPresented = true }
         } catch is CancellationError {
             teardownAudio()
         } catch {
@@ -367,6 +474,10 @@ final class AppModel {
     func stopBroadcast() async {
         startTask?.cancel()
         startTask = nil
+        appliedParameters = nil
+        robustController = nil
+        robustExtraMilliseconds = 0
+        previousStats = nil
         teardownAudio()
         do {
             try await engine.stop()
@@ -383,7 +494,109 @@ final class AppModel {
         Task {
             teardownAudio()
             try? await engine.stop()
-            startTask = Task { await startBroadcast() }
+            startTask = Task {
+                isRestarting = true
+                defer { isRestarting = false }
+                await startBroadcast()
+            }
+        }
+    }
+
+    /// "Übernehmen" in Erweitert · Latenz: restart once with the edited values.
+    func applyCustomPreset() {
+        guard preset == .custom else { return }
+        restartIfLive()
+    }
+
+    private func startRobustController(base: Int) {
+        previousStats = nil
+        robustExtraMilliseconds = 0
+        guard Self.isRobustModeEnabled else {
+            robustController = nil
+            return
+        }
+        var configuration = AdaptiveBufferController.Configuration()
+        configuration.maxExtraMilliseconds = Self.robustMaxExtraMilliseconds
+        robustController = AdaptiveBufferController(baseMilliseconds: base, configuration: configuration)
+    }
+
+    /// 1-Hz stats → adaptive buffer. Bitrate never changes; only the Mac buffer
+    /// moves live; radio values are only suggested (they need a BIG rebuild).
+    private func feedRobustController(_ newStats: EngineStats) {
+        guard var controller = robustController, isLive else { return }
+        let previous = previousStats
+        previousStats = newStats
+        guard let previous else { return }
+        let sample = AdaptiveBufferController.Sample(
+            underruns: max(0, newStats.underruns - previous.underruns),
+            stalls: max(0, newStats.stalls - previous.stalls),
+            flushes: max(0, newStats.flushes - previous.flushes),
+            radioRatio: newStats.radioRatio
+        )
+        let change = controller.update(sample)
+        if controller.suggestRadioRobustness && robustRadioSuggestion == nil, let applied = appliedParameters {
+            robustRadioSuggestion = AdaptiveBufferController.robustRadioSuggestion(for: applied)
+            appendLog("Robust: anhaltende Funkverluste – Vorschlag für den nächsten Start: RTN/Transportlatenz/PD erhöhen (Einstellungen → Übertragung)")
+        }
+        robustController = controller
+        guard let change else { return }
+        robustExtraMilliseconds = controller.extraMilliseconds
+        switch change {
+        case .raised(let total, let reason):
+            appendLog("Robust: Mac-Puffer → \(total) ms (+\(controller.extraMilliseconds) ms) wegen \(reason)")
+            Task { try? await engine.setJitterBuffer(milliseconds: total) }
+        case .lowered(let total):
+            appendLog("Robust: stabil – Mac-Puffer zurück auf \(total) ms (+\(controller.extraMilliseconds) ms)")
+            Task { try? await engine.setJitterBuffer(milliseconds: total) }
+        }
+    }
+
+    /// "Robuster senden": the suggestion becomes the preset "Eigenes" (restart).
+    func acceptRobustRadioSuggestion() {
+        guard let suggestion = robustRadioSuggestion else { return }
+        robustRadioSuggestion = nil
+        appendLog("Robust: Vorschlag übernommen – \(suggestion.summary)")
+        customParameters = suggestion
+        if preset == .custom { applyCustomPreset() } else { preset = .custom }
+    }
+
+    func dismissRobustRadioSuggestion() {
+        robustRadioSuggestion = nil
+        robustController?.clearSuggestion()
+    }
+
+    /// Settings: "Neu erzeugen".
+    func regenerateBroadcastCode() {
+        broadcastCode = BroadcastCode.generate()
+        if isPrivateBroadcast { restartIfLive() }
+    }
+
+    /// Settings: password edited by hand (applied on the next start / restart if valid).
+    func commitBroadcastCodeEdit() {
+        if isPrivateBroadcast && BroadcastCode.validate(broadcastCode) == nil { restartIfLive() }
+    }
+
+    /// Keychain → model; migrates the plain-text UserDefaults code of ≤ 0.1.3.
+    private func loadBroadcastCode() {
+        let defaults = UserDefaults.standard
+        if ScreenshotMode.isActive || isPreview {
+            broadcastCode = "K7QX-M4TB-9PRW"
+            return
+        }
+        if let legacy = defaults.string(forKey: SettingsKeys.broadcastCode) {
+            defaults.removeObject(forKey: SettingsKeys.broadcastCode)
+            if !legacy.isEmpty {
+                KeychainStore.set(legacy, for: SettingsKeys.broadcastCodeKeychainAccount)
+                if defaults.object(forKey: SettingsKeys.privateBroadcast) == nil {
+                    defaults.set(true, forKey: SettingsKeys.privateBroadcast)
+                    isPrivateBroadcast = true
+                }
+            }
+        }
+        if let stored = KeychainStore.string(for: SettingsKeys.broadcastCodeKeychainAccount), !stored.isEmpty {
+            broadcastCode = stored
+        } else {
+            broadcastCode = BroadcastCode.generate()
         }
     }
 
@@ -533,7 +746,14 @@ final class AppModel {
             isCheckingDongle = false
         case .log(let line):
             appendLog(line)
+            if line.contains("BIG Soll:") { lastBigReport = line.replacingOccurrences(of: "[info] ", with: "").replacingOccurrences(of: "[warning] ", with: "") }
+            if line.contains("Controller lehnt die BIG-Werte ab") {
+                // Not fatal: the broadcast continues with safe values – tell the user why.
+                showError(line.replacingOccurrences(of: "[warning] ", with: "")
+                          + "\n\nDie Sendung läuft mit diesen sicheren Werten weiter. Vergleich Soll/Ist: Einstellungen → Erweitert · Latenz.")
+            }
         case .stats(let newStats):
+            feedRobustController(newStats)
             stats = newStats
         case .controllerInfo(let info):
             controllerInfo = info

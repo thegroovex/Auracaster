@@ -62,10 +62,18 @@ struct SourcePickerMenu: View {
             Divider()
             Button("Liste aktualisieren", systemImage: "arrow.clockwise") { model.refreshSources() }
         } label: {
-            Label(model.selectedSource?.name ?? "Quelle wählen", systemImage: model.selectedSource?.symbol ?? "waveform")
-                .labelStyle(.titleAndIcon)
+            HStack(spacing: 6) {
+                Image(systemName: model.selectedSource?.symbol ?? "waveform")
+                Text(model.selectedSource?.name ?? "Quelle wählen")
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 180)
+            }
+            .padding(.horizontal, 4)
+            .fixedSize()
         }
-        .help("Audioquelle des Broadcasts")
+        .menuIndicator(.visible)
+        .help("Audioquelle des Broadcasts: " + (model.selectedSource?.name ?? "keine"))
     }
 }
 

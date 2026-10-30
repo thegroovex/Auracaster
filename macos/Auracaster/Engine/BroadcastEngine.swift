@@ -23,6 +23,8 @@ struct BroadcastRequest: Sendable, Equatable {
     /// Raw PCM format: "float32le,48000,2" or "int16le,48000,2".
     var audioFormat: String = "float32le,48000,2"
     var preset: BroadcastPreset = .default
+    /// Snapshot of the preset's values at start (v0.1.4); nil = `preset.parameters`.
+    var parameters: LatencyParameters?
     /// Debug: WAV of the PCM exactly as it enters the LC3 encoder.
     var recordPath: String?
 }
@@ -105,6 +107,12 @@ struct EngineStats: Sendable, Equatable {
     /// SDUs per second the BIG should take (all BIS); confirmed < expected = backlog.
     var expectedPerSecond: Double = 0
     var bigInfo: String? = nil
+    /// Target values the app asked for (v0.1.4), next to `bigInfo` (actual).
+    var bigRequested: String? = nil
+    /// The controller rejected the requested values; safe values are on air.
+    var bigFallback: Bool = false
+    /// Current jitter buffer target in the helper (ms).
+    var jitterTargetMilliseconds: Int? = nil
     /// Jitter buffer jumped back to its target after a backlog (v0.1.2).
     var flushes: Int = 0
     /// Loop iterations > 4 frame durations, and the longest wait for the radio.
@@ -202,5 +210,7 @@ protocol BroadcastEngine: Sendable {
     func connect() async throws
     /// Diagnostics: controller name, version, LE features, serial ports.
     func requestControllerInfo() async throws
+    /// Jitter buffer target while live ("Robust bei Aussetzern", v0.1.4).
+    func setJitterBuffer(milliseconds: Int) async throws
     func shutdown() async
 }

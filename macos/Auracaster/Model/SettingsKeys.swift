@@ -26,6 +26,20 @@ enum SettingsKeys {
     static let monoBroadcast = "monoBroadcast"
     /// v0.1.2 moved the default preset to "Ausgewogen" once.
     static let presetMigration012 = "presetMigration012"
+    /// Values of the preset "Eigenes" (JSON of `LatencyParameters`, v0.1.4).
+    static let customPreset = "customPresetParameters"
+    /// Private (encrypted) broadcast; the code itself lives in the keychain (v0.1.4).
+    static let privateBroadcast = "privateBroadcast"
+    /// LC3 bitrate per channel for every built-in preset, 0 = preset default (v0.1.4).
+    static let bitrateOverride = "bitrateOverride"
+    /// "Robust bei Aussetzern": adaptive Mac buffer (default on, v0.1.4).
+    static let robustMode = "robustMode"
+    /// Upper limit of the automatic extra latency in ms (default 100).
+    static let robustMaxExtraMs = "robustMaxExtraMs"
+    /// Extra apps excluded from "Systemaudio" (bundle ID / name fragments, comma separated, v0.1.4).
+    static let excludedAudioApps = "excludedAudioApps"
+    /// Keychain account of the Broadcast Code.
+    static let broadcastCodeKeychainAccount = "broadcastCode"
 }
 
 enum EngineKind: String, CaseIterable, Identifiable, Sendable {
