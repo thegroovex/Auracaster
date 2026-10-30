@@ -59,6 +59,10 @@ Der Mac selbst kann das (noch) nicht senden. **Auracaster** macht es möglich:
 <td><img src="docs/images/settings-light.png" alt="Einstellungen"><br><b>Einstellungen</b> – Engine, Dongle, Broadcast-Code/Sprache, Updates.</td>
 </tr>
 <tr>
+<td><img src="docs/images/settings-latency-dark.png" alt="Erweitert · Qualität und Latenz"><br><b>Preset „Eigenes“</b> – Bitrate (mit BAP-Stufen) getrennt von Latenz: Frame, Presentation Delay, RTN, Transportlatenz, Mac-Puffer, PHY, Packing, optional explizite BIG-Werte; geschätzte Gesamtlatenz und Warnungen live.</td>
+<td><img src="docs/images/pairing-light.png" alt="Kopplung eines privaten Broadcasts"><br><b>Private Broadcasts</b> – verschlüsselt mit Passwort (im Schlüsselbund), Kopplungsfenster mit Name, Passwort und Auracast-QR-Code zum Scannen mit dem Handy.</td>
+</tr>
+<tr>
 <td><img src="docs/images/onboarding-light.png" alt="Willkommens-Assistent"><br><b>Willkommens-Assistent</b> – erkennt den Dongle live und richtet die Engine mit einem Klick ein.</td>
 <td><img src="docs/images/update-light.png" alt="Update-Dialog"><br><b>Eingebaute Updates</b> – prüft täglich auf neue Versionen und installiert sie ohne Gatekeeper-Ärger.</td>
 </tr>
